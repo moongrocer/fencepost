@@ -1,0 +1,529 @@
+/* FENCEPOST — NewTek LightWave 3D (classic Modeler, 5.6–7.5 era) theme.
+   Warm gray/taupe panels, 1px bevels, pale yellow-green active highlight,
+   Tahoma 11px, zero modern chrome. */
+
+:root {
+  --lw-panel: #aeaaa2;
+  --lw-panel-hi: #b5b0a8;
+  --lw-panel-lo: #a7a7a7;
+  --lw-bevel-light: #d6d3cc;
+  --lw-bevel-dark: #6e6b65;
+  --lw-bevel-darker: #4a4843;
+  --lw-text: #2b2b28;
+  --lw-text-dim: #55524c;
+  --lw-active: #d8d9a3;
+  --lw-active-2: #cdd093;
+  --lw-surround: #5e5e5e;
+  --lw-viewport-bg: #101010;
+  --lw-info-bg: #9d9a93;
+  --lw-input-bg: #c3bfb7;
+  --lw-accent: #7a8db0;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+  border-radius: 0 !important;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--lw-surround);
+  font-family: Tahoma, Verdana, 'MS Sans Serif', sans-serif;
+  font-size: 11px;
+  color: var(--lw-text);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+#app {
+  display: grid;
+  grid-template-rows: 24px 1fr 20px;
+  width: 100%;
+  height: 100%;
+}
+
+/* ---------- top bar: logo + tabs + right buttons ---------- */
+.lw-top {
+  display: flex;
+  align-items: stretch;
+  background: var(--lw-panel);
+  border-bottom: 1px solid var(--lw-bevel-darker);
+  gap: 0;
+}
+
+.lw-logo {
+  display: flex;
+  align-items: center;
+  padding: 0 10px 0 8px;
+  font-weight: bold;
+  font-size: 11px;
+  letter-spacing: 2px;
+  color: var(--lw-text);
+  text-shadow: 1px 1px 0 var(--lw-bevel-light);
+  border-right: 1px solid var(--lw-bevel-dark);
+}
+
+.lw-tabs {
+  display: flex;
+  align-items: flex-end;
+  flex: 1;
+}
+
+.lw-tab {
+  font: inherit;
+  padding: 4px 14px 3px;
+  background: var(--lw-panel-lo);
+  border: 1px solid;
+  border-color: var(--lw-bevel-light) var(--lw-bevel-dark) var(--lw-bevel-dark) var(--lw-bevel-light);
+  border-bottom: none;
+  margin: 3px 1px 0 1px;
+  cursor: pointer;
+  color: var(--lw-text);
+  letter-spacing: 1px;
+}
+
+.lw-tab.active {
+  background: var(--lw-active);
+  padding-top: 5px;
+  margin-top: 2px;
+}
+
+.lw-topbtns {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0 4px;
+}
+
+/* ---------- main area ---------- */
+.lw-main {
+  display: grid;
+  grid-template-columns: 182px 1fr;
+  min-height: 0;
+}
+
+/* The palette wraps the tool column: a docked grid cell normally, a floating
+   movable panel in calibrate mode. */
+.lw-palette {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--lw-panel);
+  border-right: 1px solid var(--lw-bevel-darker);
+}
+
+.lw-palette-header,
+.lw-palette-tabs {
+  display: none; /* shown only in calibrate mode */
+}
+
+.lw-toolcol {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 3px 3px 12px;
+  scrollbar-width: thin;
+}
+
+.lw-viewport {
+  position: relative;
+  background: var(--lw-surround);
+  overflow: hidden;
+  min-width: 0;
+  min-height: 0;
+}
+
+.vp-stack {
+  position: absolute;
+  background: var(--lw-viewport-bg);
+  box-shadow: 0 0 0 1px var(--lw-bevel-darker);
+}
+
+.vp-stack canvas {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+}
+
+#overlay-canvas {
+  cursor: crosshair;
+}
+
+/* ---------- buttons ---------- */
+.lw-btn {
+  display: block;
+  width: 100%;
+  font: inherit;
+  text-align: center;
+  color: var(--lw-text);
+  background: linear-gradient(180deg, var(--lw-panel-hi), var(--lw-panel-lo));
+  border: 1px solid;
+  border-color: var(--lw-bevel-light) var(--lw-bevel-dark) var(--lw-bevel-dark) var(--lw-bevel-light);
+  padding: 3px 6px 2px;
+  margin: 1px 0;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lw-btn:active,
+.lw-btn.pressed {
+  border-color: var(--lw-bevel-dark) var(--lw-bevel-light) var(--lw-bevel-light) var(--lw-bevel-dark);
+  background: var(--lw-panel-lo);
+}
+
+.lw-btn.active {
+  background: var(--lw-active);
+  border-color: var(--lw-bevel-dark) var(--lw-bevel-light) var(--lw-bevel-light) var(--lw-bevel-dark);
+}
+
+.lw-btn.mini {
+  display: inline-block;
+  width: auto;
+  padding: 2px 7px 1px;
+}
+
+.lw-btn:disabled {
+  color: #7d7a74;
+  cursor: default;
+}
+
+/* ---------- groups with etched separators ---------- */
+.lw-group {
+  margin: 2px 1px 6px;
+}
+
+.lw-group-label {
+  font-size: 9px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--lw-text-dim);
+  padding: 2px 2px 1px;
+  border-top: 1px solid var(--lw-bevel-dark);
+  box-shadow: 0 1px 0 var(--lw-bevel-light) inset;
+  margin-bottom: 2px;
+}
+
+/* ---------- mini numeric fields ---------- */
+.lw-field {
+  display: flex;
+  align-items: center;
+  margin: 1px 0;
+  height: 18px;
+  gap: 2px;
+}
+
+.lw-field-label {
+  flex: 0 0 62px;
+  font-size: 10px;
+  color: var(--lw-text);
+  cursor: ew-resize;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.lw-field input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 10px;
+  background: var(--lw-input-bg);
+  color: var(--lw-text);
+  border: 1px solid;
+  border-color: var(--lw-bevel-dark) var(--lw-bevel-light) var(--lw-bevel-light) var(--lw-bevel-dark);
+  padding: 1px 3px;
+  height: 16px;
+  user-select: text;
+}
+
+.lw-field input:focus {
+  outline: none;
+  background: #d2cec6;
+}
+
+.lw-stepper {
+  display: flex;
+  flex-direction: row;
+}
+
+.lw-stepper button {
+  font: inherit;
+  font-size: 8px;
+  line-height: 1;
+  width: 13px;
+  height: 16px;
+  background: linear-gradient(180deg, var(--lw-panel-hi), var(--lw-panel-lo));
+  border: 1px solid;
+  border-color: var(--lw-bevel-light) var(--lw-bevel-dark) var(--lw-bevel-dark) var(--lw-bevel-light);
+  color: var(--lw-text);
+  cursor: pointer;
+  padding: 0;
+}
+
+.lw-stepper button:active {
+  border-color: var(--lw-bevel-dark) var(--lw-bevel-light) var(--lw-bevel-light) var(--lw-bevel-dark);
+}
+
+/* ---------- info bar ---------- */
+.lw-infobar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  background: var(--lw-info-bg);
+  border-top: 1px solid var(--lw-bevel-light);
+  padding: 0 8px;
+  font-family: 'Lucida Console', 'Courier New', monospace;
+  font-size: 10px;
+  color: var(--lw-text);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.lw-infobar span {
+  flex: 0 0 auto;
+}
+
+/* ---------- thumbnails ---------- */
+.lw-thumbs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  padding: 2px 0;
+}
+
+.lw-thumb {
+  position: relative;
+  width: 52px;
+  height: 34px;
+  border: 1px solid var(--lw-bevel-dark);
+  background: #000;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.lw-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.lw-thumb.active {
+  outline: 2px solid var(--lw-active);
+}
+
+.lw-thumb .x {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 12px;
+  height: 12px;
+  background: var(--lw-panel);
+  color: var(--lw-text);
+  font-size: 9px;
+  line-height: 12px;
+  text-align: center;
+  border: 1px solid var(--lw-bevel-dark);
+  cursor: pointer;
+}
+
+/* ---------- help overlay ---------- */
+.lw-help {
+  position: fixed;
+  inset: 0;
+  background: rgba(20, 20, 18, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+}
+
+.lw-help-panel {
+  background: var(--lw-panel);
+  border: 1px solid;
+  border-color: var(--lw-bevel-light) var(--lw-bevel-darker) var(--lw-bevel-darker) var(--lw-bevel-light);
+  padding: 10px 16px 14px;
+  max-width: 460px;
+}
+
+.lw-help-panel h2 {
+  font-size: 11px;
+  letter-spacing: 2px;
+  border-bottom: 1px solid var(--lw-bevel-dark);
+  margin-bottom: 8px;
+  padding-bottom: 3px;
+}
+
+.lw-help-panel table {
+  border-collapse: collapse;
+  font-size: 10px;
+}
+
+.lw-help-panel td {
+  padding: 2px 10px 2px 0;
+  vertical-align: top;
+}
+
+.lw-help-panel td.key {
+  font-family: 'Lucida Console', monospace;
+  color: var(--lw-text-dim);
+  white-space: nowrap;
+}
+
+/* ---------- output mode: bare projector feed ---------- */
+body.output-mode .lw-top,
+body.output-mode .lw-infobar,
+body.output-mode .lw-palette,
+body.output-mode .lw-restore-chip,
+body.output-mode #overlay-canvas {
+  display: none;
+}
+
+/* Hidden siblings would shift the viewport into collapsed grid tracks, so
+   in output mode the viewport leaves the grid and covers the window. */
+body.output-mode .lw-viewport {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  background: #000;
+}
+
+/* ---------- calibrate mode: full-bleed live editing, floating palette ----- */
+body.calibrate-mode .lw-top,
+body.calibrate-mode .lw-infobar {
+  display: none;
+}
+
+/* Canvas fills the window 1:1 with the projector; overlay/handles stay live. */
+body.calibrate-mode .lw-viewport {
+  position: fixed;
+  inset: 0;
+  z-index: 5;
+  background: #000;
+}
+
+body.calibrate-mode .lw-palette {
+  position: fixed;
+  left: 12px;
+  top: 12px;
+  width: 196px;
+  max-height: calc(100vh - 24px);
+  z-index: 30;
+  border: 1px solid;
+  border-color: var(--lw-bevel-light) var(--lw-bevel-darker) var(--lw-bevel-darker) var(--lw-bevel-light);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.55);
+  opacity: 0.96;
+}
+
+body.calibrate-mode .lw-palette-header {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 2px 2px 7px;
+  background: linear-gradient(180deg, var(--lw-active), var(--lw-active-2));
+  border-bottom: 1px solid var(--lw-bevel-dark);
+  cursor: move;
+  touch-action: none;
+}
+
+.lw-palette-title {
+  font-weight: bold;
+  letter-spacing: 1.5px;
+  font-size: 10px;
+}
+
+.lw-palette-x {
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+  width: 18px;
+  height: 16px;
+  padding: 0;
+  color: var(--lw-text);
+  background: linear-gradient(180deg, var(--lw-panel-hi), var(--lw-panel-lo));
+  border: 1px solid;
+  border-color: var(--lw-bevel-light) var(--lw-bevel-dark) var(--lw-bevel-dark) var(--lw-bevel-light);
+  cursor: pointer;
+}
+
+.lw-palette-x:active {
+  border-color: var(--lw-bevel-dark) var(--lw-bevel-light) var(--lw-bevel-light) var(--lw-bevel-dark);
+}
+
+body.calibrate-mode .lw-palette-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1px;
+  padding: 2px;
+  background: var(--lw-panel);
+}
+
+body.calibrate-mode .lw-palette-tabs .lw-tab {
+  margin: 0;
+  flex: 1 0 auto;
+  padding: 2px 6px;
+  border-bottom: 1px solid;
+  border-color: var(--lw-bevel-light) var(--lw-bevel-dark) var(--lw-bevel-dark) var(--lw-bevel-light);
+}
+
+body.calibrate-mode .lw-palette.collapsed .lw-palette-tabs,
+body.calibrate-mode .lw-palette.collapsed .lw-toolcol {
+  display: none;
+}
+
+/* Fully hidden palette + the chip that brings it back. */
+.lw-restore-chip {
+  display: none;
+}
+
+body.calibrate-mode.palette-hidden .lw-palette {
+  display: none;
+}
+
+body.calibrate-mode.palette-hidden:not(.output-mode) .lw-restore-chip {
+  display: block;
+  position: fixed;
+  left: 12px;
+  top: 12px;
+  width: auto;
+  z-index: 30;
+  opacity: 0.92;
+}
+
+/* misc */
+.lw-row {
+  display: flex;
+  gap: 2px;
+}
+
+.lw-row .lw-btn {
+  flex: 1;
+}
+
+.lw-note {
+  font-size: 9px;
+  color: var(--lw-text-dim);
+  padding: 2px;
+  line-height: 1.4;
+  white-space: normal;
+}
+
+input[type='text'].lw-text {
+  width: 100%;
+  font: inherit;
+  font-size: 10px;
+  background: var(--lw-input-bg);
+  border: 1px solid;
+  border-color: var(--lw-bevel-dark) var(--lw-bevel-light) var(--lw-bevel-light) var(--lw-bevel-dark);
+  padding: 2px 3px;
+  margin: 1px 0;
+  user-select: text;
+}

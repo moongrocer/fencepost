@@ -1,0 +1,19 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+
+# local exports / test artifacts
+fencepost_test/
+*.mpcdi
+*-raw.zip
+
+# editor / agent tooling
+.claude/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.log
+npm-debug.log*

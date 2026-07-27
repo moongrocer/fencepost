@@ -1,0 +1,11 @@
+# Normalize line endings: LF in the repo, auto-convert on checkout.
+* text=auto eol=lf
+
+# Windows batch launcher must stay CRLF to run reliably.
+*.bat text eol=crlf
+
+# Treat exported/binary assets as binary.
+*.png binary
+*.pfm binary
+*.mpcdi binary
+*.zip binary
