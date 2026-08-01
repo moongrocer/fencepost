@@ -1,25 +1,34 @@
 /**
  * FENCEPOST application orchestrator: owns the project state, undo stack,
  * GL renderer, overlay, panels, keyboard map, and the export pipeline.
+ *
+ * Multi-region (mosaic) model: the project is one mosaic framebuffer split
+ * into N regions (projectors). All editing applies to the ACTIVE region;
+ * the render pass draws every region into its slice of the one canvas —
+ * which is exactly what a fullscreen window on an NVIDIA Mosaic / Eyefinity
+ * desktop needs.
  */
 import { bakeAlphaMap, bakeBetaMap, hasBlend } from './render/blend';
-import { GLRenderer } from './render/gl';
+import { GLRenderer, RegionDrawUniforms } from './render/gl';
 import { generatePattern, patternLabel, Still } from './render/patterns';
-import { buildMpcdiXml } from './export/mpcdi-xml';
+import { buildMpcdiXml, MpcdiRegionEntry, safeFileName } from './export/mpcdi-xml';
 import { encodePFM } from './export/pfm';
 import { encodeGrayPNG } from './export/png';
 import { buildArchive, downloadBytes } from './export/zip';
 import { autosave, loadAutosave, openProjectFile, saveProjectFile } from './state/persist';
 import {
   defaultProject,
+  defaultRegion,
   deserializeProject,
+  mosaicColumns,
   PatternId,
   ProjectState,
+  RegionState,
   serializeProject,
 } from './state/project';
 import { UndoStack } from './state/undo';
 import { createBezierGrid, subdivideAfterColumn, subdivideAfterRow } from './warp/bezier';
-import { buildWarpMesh } from './warp/compose';
+import { buildRegionMesh } from './warp/compose';
 import { addPost, createFence, removePost, setPostX, widestGapMid } from './warp/fence';
 import { button, el } from './ui/dom';
 import { buildHelpOverlay } from './ui/help';
@@ -70,8 +79,7 @@ export class App implements EditorHost {
   /**
    * Calibrate mode: canvas fills the whole window 1:1 with the projector
    * raster and editing stays live, while the tool column becomes a floating,
-   * draggable, collapsible palette so it can be shoved off the area being
-   * warped. Auto-engaged on fullscreen (the on-projector working state).
+   * draggable, collapsible palette. Auto-engaged on fullscreen.
    */
   private calibrateMode = false;
   private palette!: HTMLElement;
@@ -80,8 +88,11 @@ export class App implements EditorHost {
   private paletteCollapsed = false;
   private paletteHidden = false;
   private palettePos: { x: number; y: number } | null = null;
-  private meshDirty = true;
+  private regionStripTop!: HTMLElement;
+  private regionStripPalette!: HTMLElement;
   private patternDirty = true;
+  /** which regions need a mesh rebuild ('all' after structural changes) */
+  private dirtyRegions: Set<number> | 'all' = 'all';
   private currentTess = FULL_TESS;
   private rafPending = false;
   private cssW = 0;
@@ -101,6 +112,8 @@ export class App implements EditorHost {
       this.tabButtons.set(t, b);
     }
     top.appendChild(tabs);
+    this.regionStripTop = el('div', 'lw-topbtns');
+    top.appendChild(this.regionStripTop);
     const topBtns = el('div', 'lw-topbtns');
     topBtns.appendChild(button('CALIBRATE', () => this.setCalibrateMode(!this.calibrateMode), 'lw-btn mini'));
     topBtns.appendChild(button('OUTPUT', () => this.setOutputMode(true), 'lw-btn mini'));
@@ -167,10 +180,95 @@ export class App implements EditorHost {
       if (e.dataTransfer?.files.length) void this.addStillFiles(Array.from(e.dataTransfer.files));
     });
 
+    this.refreshRegionStrips();
     this.setTab('PATTERNS');
     this.layoutViewport();
     this.updateInfo();
     this.requestRender();
+  }
+
+  // ============================== regions ==============================
+
+  /** the region all editing applies to */
+  get region(): RegionState {
+    return this.project.regions[this.project.activeRegion];
+  }
+
+  setActiveRegion(i: number): void {
+    const n = this.project.regions.length;
+    const clamped = Math.min(Math.max(0, i), n - 1);
+    if (clamped === this.project.activeRegion) return;
+    this.project.activeRegion = clamped;
+    this.selection.clear();
+    autosave(this.project);
+    this.refreshRegionStrips();
+    this.rebuildPanel();
+    this.requestRender();
+    this.updateInfo();
+  }
+
+  cycleRegion(dir: number): void {
+    const n = this.project.regions.length;
+    this.setActiveRegion((this.project.activeRegion + dir + n) % n);
+  }
+
+  /** Replace the project's regions with an N-column mosaic. */
+  buildMosaic(cols: number, projW: number, projH: number, overlapPx: number): void {
+    if (!confirm(`Build a ${cols}-column mosaic (${cols}×${projW}×${projH}, ${overlapPx}px overlap)? All region warps reset.`)) {
+      return;
+    }
+    this.edit(
+      () => {
+        const m = mosaicColumns(cols, projW, projH, overlapPx);
+        this.project.outputW = m.outputW;
+        this.project.outputH = m.outputH;
+        this.project.regions = m.regions;
+        this.project.activeRegion = 0;
+        this.selection.clear();
+      },
+      { warp: true, pattern: true, structural: true },
+    );
+    this.dirtyRegions = 'all';
+    this.refreshRegionStrips();
+    this.layoutViewport();
+  }
+
+  /** Collapse back to a single full-frame region. */
+  makeSingleRegion(): void {
+    if (!confirm('Collapse to a single full-frame region? All region warps reset.')) return;
+    this.edit(
+      () => {
+        this.project.regions = [
+          defaultRegion('region0', { x: 0, y: 0, w: 1, h: 1 }, { x: 0, y: 0, w: 1, h: 1 }),
+        ];
+        this.project.activeRegion = 0;
+        this.selection.clear();
+      },
+      { warp: true, structural: true },
+    );
+    this.dirtyRegions = 'all';
+    this.refreshRegionStrips();
+  }
+
+  setRegionId(v: string): void {
+    this.edit(() => {
+      this.region.id = v || `region${this.project.activeRegion}`;
+    }, {});
+  }
+
+  private refreshRegionStrips(): void {
+    const build = (host: HTMLElement) => {
+      host.replaceChildren();
+      if (this.project.regions.length < 2) return;
+      this.project.regions.forEach((r, i) => {
+        const b = button(`R${i + 1}`, () => this.setActiveRegion(i), 'lw-btn mini');
+        b.title = r.id;
+        if (i === this.project.activeRegion) b.classList.add('active');
+        host.appendChild(b);
+      });
+    };
+    build(this.regionStripTop);
+    build(this.regionStripPalette);
   }
 
   // ============================== palette ==============================
@@ -208,6 +306,9 @@ export class App implements EditorHost {
       this.paletteTabButtons.set(t, b);
     }
     palette.appendChild(tabRow);
+
+    this.regionStripPalette = el('div', 'lw-palette-tabs');
+    palette.appendChild(this.regionStripPalette);
 
     this.toolcol = el('div', 'lw-toolcol');
     palette.appendChild(this.toolcol);
@@ -285,8 +386,8 @@ export class App implements EditorHost {
     let y: number;
     if (this.outputMode || this.calibrateMode) {
       // bare projector feed / live calibration: fill the window edge to edge
-      // so the warped frame maps 1:1 to the projector raster. (Set output
-      // resolution to the projector's native res to keep the pattern square.)
+      // so the warped frame maps 1:1 to the mosaic raster. (Set output
+      // resolution to the mosaic's native res to keep the pattern square.)
       w = vw;
       h = vh;
       x = 0;
@@ -330,28 +431,39 @@ export class App implements EditorHost {
     });
   }
 
+  private regionUniforms(r: RegionState): RegionDrawUniforms {
+    const p = this.project;
+    return {
+      src: [r.src.x, r.src.y, r.src.w, r.src.h],
+      srcPx: [r.src.w * p.outputW, r.src.h * p.outputH],
+      blendWidths: [r.blend.left.width, r.blend.right.width, r.blend.top.width, r.blend.bottom.width],
+      blendGammas: [r.blend.left.gamma, r.blend.right.gamma, r.blend.top.gamma, r.blend.bottom.gamma],
+      lift: r.blackLevel,
+    };
+  }
+
   private renderFrame(): void {
+    const p = this.project;
     if (this.patternDirty) {
       this.patternDirty = false;
-      this.renderer.setPattern(generatePattern(this.project, this.stills));
+      this.renderer.setPattern(generatePattern(p, this.stills));
     }
-    if (this.meshDirty) {
-      this.meshDirty = false;
-      this.renderer.setMesh(buildWarpMesh(this.project.bezier, this.project.fence, this.currentTess));
+    this.renderer.setRegionCount(p.regions.length);
+    if (this.dirtyRegions === 'all') {
+      p.regions.forEach((r, i) => this.renderer.setRegionMesh(i, buildRegionMesh(r, FULL_TESS, true)));
+    } else {
+      for (const i of this.dirtyRegions) {
+        const r = p.regions[i];
+        if (r) this.renderer.setRegionMesh(i, buildRegionMesh(r, this.currentTess, true));
+      }
     }
-    const b = this.project.blend;
+    this.dirtyRegions = new Set();
     this.renderer.draw(
-      {
-        blendWidths: [b.left.width, b.right.width, b.top.width, b.bottom.width],
-        blendGammas: [b.left.gamma, b.right.gamma, b.top.gamma, b.bottom.gamma],
-        lift: this.project.blackLevel,
-        outputW: this.project.outputW,
-        outputH: this.project.outputH,
-      },
-      this.project.overlays.wireframe && !this.outputMode,
+      p.regions.map((r) => this.regionUniforms(r)),
+      p.overlays.wireframe && !this.outputMode,
     );
     if (!this.outputMode) {
-      drawOverlay(this.overlayCtx, this.project, {
+      drawOverlay(this.overlayCtx, p, {
         cw: this.cssW,
         ch: this.cssH,
         dpr: window.devicePixelRatio || 1,
@@ -367,6 +479,10 @@ export class App implements EditorHost {
     this.requestRender();
   }
 
+  private markActiveDirty(): void {
+    if (this.dirtyRegions !== 'all') this.dirtyRegions.add(this.project.activeRegion);
+  }
+
   // ============================== editing & undo ==============================
 
   private snapshot(): string {
@@ -379,7 +495,7 @@ export class App implements EditorHost {
 
   endGesture(): void {
     this.currentTess = FULL_TESS;
-    this.meshDirty = true;
+    this.markActiveDirty();
     autosave(this.project);
     this.requestRender();
     this.updateInfo();
@@ -387,13 +503,13 @@ export class App implements EditorHost {
 
   warpEdited(interactive: boolean): void {
     this.currentTess = interactive ? DRAG_TESS : FULL_TESS;
-    this.meshDirty = true;
+    this.markActiveDirty();
     this.requestRender();
     this.updateInfo();
   }
 
   applyEdit(opts: EditOpts = {}): void {
-    if (opts.warp) this.meshDirty = true;
+    if (opts.warp) this.markActiveDirty();
     if (opts.pattern) this.patternDirty = true;
     this.currentTess = FULL_TESS;
     autosave(this.project);
@@ -412,10 +528,11 @@ export class App implements EditorHost {
   private restoreSnapshot(json: string): void {
     this.project = deserializeProject(json);
     this.pruneSelection();
-    this.meshDirty = true;
+    this.dirtyRegions = 'all';
     this.patternDirty = true;
     this.currentTess = FULL_TESS;
     autosave(this.project);
+    this.refreshRegionStrips();
     this.rebuildPanel();
     this.layoutViewport();
     this.requestRender();
@@ -433,13 +550,13 @@ export class App implements EditorHost {
   }
 
   private pruneSelection(): void {
-    const p = this.project;
+    const r = this.region;
     for (const id of Array.from(this.selection)) {
       const parts = id.split(':');
       const valid =
         parts[0] === 'b'
-          ? +parts[1] < p.bezier.cols && +parts[2] < p.bezier.rows
-          : +parts[1] < p.fence.posts.length;
+          ? +parts[1] < r.bezier.cols && +parts[2] < r.bezier.rows
+          : +parts[1] < r.fence.posts.length;
       if (!valid) this.selection.delete(id);
     }
   }
@@ -458,23 +575,28 @@ export class App implements EditorHost {
 
   updateInfo(): void {
     const p = this.project;
+    const r = this.region;
     let selText = `sel ${this.selection.size}`;
     if (this.selection.size === 1) {
       const id = this.selection.values().next().value as string;
-      const v = readHandleValue(p, id);
+      const v = readHandleValue(r, id);
       if (v) {
+        const rw = r.rect.w * p.outputW;
+        const rh = r.rect.h * p.outputH;
         if (id.startsWith('b:')) {
-          selText = `sel ${id} @ ${(v.x * p.outputW).toFixed(2)}, ${(v.y * p.outputH).toFixed(2)} px`;
+          selText = `sel ${id} @ ${(v.x * rw).toFixed(2)}, ${(v.y * rh).toFixed(2)} px`;
         } else if (id.startsWith('fp:')) {
-          selText = `sel post ${id.slice(3)} @ x ${(v.x * p.outputW).toFixed(2)} px`;
+          selText = `sel post ${id.slice(3)} @ x ${(v.x * rw).toFixed(2)} px`;
         } else {
-          selText = `sel ${id} @ y ${(v.y * p.outputH).toFixed(2)} px`;
+          selText = `sel ${id} @ y ${(v.y * rh).toFixed(2)} px`;
         }
       }
     }
     this.info.sel.textContent = selText;
     this.info.step.textContent = 'step 4px / shift 0.25px';
-    this.info.density.textContent = `grid ${p.bezier.cols}×${p.bezier.rows} | posts ${p.fence.posts.length}`;
+    const regionInfo =
+      p.regions.length > 1 ? `R${p.activeRegion + 1}/${p.regions.length} ${r.id} | ` : '';
+    this.info.density.textContent = `${regionInfo}grid ${r.bezier.cols}×${r.bezier.rows} | posts ${r.fence.posts.length}`;
     this.info.pattern.textContent = `${patternLabel(p, this.stills)} | ${p.outputW}×${p.outputH}`;
   }
 
@@ -562,6 +684,12 @@ export class App implements EditorHost {
       case 'Backspace':
         this.removeSelectedPost();
         return;
+      case ',':
+        this.cycleRegion(-1);
+        return;
+      case '.':
+        this.cycleRegion(1);
+        return;
       case '?':
         this.toggleHelp();
         return;
@@ -606,34 +734,35 @@ export class App implements EditorHost {
     }
   };
 
-  /** dx/dy in {-1,0,1}; fine = 0.25 px steps, coarse = 4 px. */
+  /** dx/dy in {-1,0,1}; fine = 0.25 px steps, coarse = 4 px (projector px). */
   private nudgeSelection(dx: number, dy: number, fine: boolean): void {
     if (this.selection.size === 0) return;
     const px = fine ? 0.25 : 4;
-    const dxN = (dx * px) / this.project.outputW;
-    const dyN = (dy * px) / this.project.outputH;
+    const r = this.region;
+    // region-local normalized units so a "px" is a pixel of THIS projector
+    const dxN = (dx * px) / (this.project.outputW * r.rect.w);
+    const dyN = (dy * px) / (this.project.outputH * r.rect.h);
     this.beginGesture();
-    const p = this.project;
     for (const id of this.selection) {
       const parts = id.split(':');
       if (parts[0] === 'b') {
-        const k = (+parts[2] * p.bezier.cols + +parts[1]) * 2;
-        p.bezier.points[k] += dxN;
-        p.bezier.points[k + 1] += dyN;
+        const k = (+parts[2] * r.bezier.cols + +parts[1]) * 2;
+        r.bezier.points[k] += dxN;
+        r.bezier.points[k + 1] += dyN;
       } else if (parts[0] === 'ft') {
-        const post = p.fence.posts[+parts[1]];
+        const post = r.fence.posts[+parts[1]];
         if (post) post.top += dyN;
       } else if (parts[0] === 'fb') {
-        const post = p.fence.posts[+parts[1]];
+        const post = r.fence.posts[+parts[1]];
         if (post) post.bottom += dyN;
       } else if (parts[0] === 'fp') {
         const i = +parts[1];
-        if (dxN !== 0) p.fence = setPostX(p.fence, i, p.fence.posts[i].x + dxN);
+        if (dxN !== 0) r.fence = setPostX(r.fence, i, r.fence.posts[i].x + dxN);
         if (dyN !== 0) {
           // up/down on a selected post shifts the whole board edge: both its
           // top and bottom edge points move together
-          p.fence.posts[i].top += dyN;
-          p.fence.posts[i].bottom += dyN;
+          r.fence.posts[i].top += dyN;
+          r.fence.posts[i].bottom += dyN;
         }
       }
     }
@@ -776,14 +905,14 @@ export class App implements EditorHost {
     );
   }
 
-  // ============================== warp ops ==============================
+  // ============================== warp ops (active region) ==============================
 
   setDensity(n: number): void {
     const d = Math.min(17, Math.max(3, Math.round(n)));
     if (!confirm(`Reset bezier grid to ${d} × ${d}? Current bezier warp will be lost.`)) return;
     this.edit(
       () => {
-        this.project.bezier = createBezierGrid(d, d);
+        this.region.bezier = createBezierGrid(d, d);
         this.selection.clear();
       },
       { warp: true, structural: true },
@@ -800,14 +929,15 @@ export class App implements EditorHost {
     const parts = sel[0].split(':');
     const i = +parts[1];
     const j = +parts[2];
+    const bez = this.region.bezier;
     const next =
       direction === 'col'
-        ? subdivideAfterColumn(this.project.bezier, Math.min(i, this.project.bezier.cols - 2))
-        : subdivideAfterRow(this.project.bezier, Math.min(j, this.project.bezier.rows - 2));
+        ? subdivideAfterColumn(bez, Math.min(i, bez.cols - 2))
+        : subdivideAfterRow(bez, Math.min(j, bez.rows - 2));
     if (!next) return;
     this.edit(
       () => {
-        this.project.bezier = next;
+        this.region.bezier = next;
         this.selection.clear();
       },
       { warp: true, structural: true },
@@ -816,7 +946,7 @@ export class App implements EditorHost {
 
   /** Cycle post selection from the panel (no precise clicking needed). */
   selectPost(dir: number): void {
-    const n = this.project.fence.posts.length;
+    const n = this.region.fence.posts.length;
     const cur = this.selectedPostIndex();
     const next = cur === null ? (dir > 0 ? 0 : n - 1) : (cur + dir + n) % n;
     this.selection.clear();
@@ -826,7 +956,7 @@ export class App implements EditorHost {
 
   selectedPostIndex(): number | null {
     for (const id of this.selection) {
-      const m = id.match(/^f[tbp]:(\d+)$/) ?? id.match(/^fp:(\d+)$/);
+      const m = id.match(/^f[tbp]:(\d+)$/);
       if (m) return +m[1];
     }
     return null;
@@ -835,7 +965,7 @@ export class App implements EditorHost {
   addFencePost(): void {
     this.edit(
       () => {
-        this.project.fence = addPost(this.project.fence, widestGapMid(this.project.fence));
+        this.region.fence = addPost(this.region.fence, widestGapMid(this.region.fence));
       },
       { warp: true, structural: true },
     );
@@ -844,10 +974,10 @@ export class App implements EditorHost {
   removeSelectedPost(): void {
     const i = this.selectedPostIndex();
     if (i === null) return;
-    if (i === 0 || i === this.project.fence.posts.length - 1) return; // boundaries
+    if (i === 0 || i === this.region.fence.posts.length - 1) return; // boundaries
     this.edit(
       () => {
-        this.project.fence = removePost(this.project.fence, i);
+        this.region.fence = removePost(this.region.fence, i);
         this.selection.clear();
       },
       { warp: true, structural: true },
@@ -859,7 +989,7 @@ export class App implements EditorHost {
     if (i === null) return;
     this.edit(
       () => {
-        const post = this.project.fence.posts[i];
+        const post = this.region.fence.posts[i];
         post.corner = !post.corner;
       },
       { warp: true, structural: true },
@@ -867,24 +997,24 @@ export class App implements EditorHost {
   }
 
   movePostTo(i: number, x: number): void {
-    this.project.fence = setPostX(this.project.fence, i, x);
+    this.region.fence = setPostX(this.region.fence, i, x);
   }
 
   resetBezier(): void {
-    if (!confirm('Reset bezier warp to identity?')) return;
+    if (!confirm('Reset bezier warp to identity (active region)?')) return;
     this.edit(
       () => {
-        this.project.bezier = createBezierGrid(this.project.bezier.cols, this.project.bezier.rows);
+        this.region.bezier = createBezierGrid(this.region.bezier.cols, this.region.bezier.rows);
       },
       { warp: true, structural: true },
     );
   }
 
   resetFence(): void {
-    if (!confirm('Reset fence (remove all posts, flatten edges)?')) return;
+    if (!confirm('Reset fence (active region)?')) return;
     this.edit(
       () => {
-        this.project.fence = createFence();
+        this.region.fence = createFence();
         this.selection.clear();
       },
       { warp: true, structural: true },
@@ -901,12 +1031,14 @@ export class App implements EditorHost {
       },
       { warp: true, pattern: true, structural: true },
     );
+    this.dirtyRegions = 'all';
+    this.refreshRegionStrips();
     this.layoutViewport();
   }
 
   setResolution(w: number, h: number, gestureAlreadyPushed = false): void {
     const apply = () => {
-      this.project.outputW = Math.min(8192, Math.max(64, Math.round(w)));
+      this.project.outputW = Math.min(16384, Math.max(64, Math.round(w)));
       this.project.outputH = Math.min(8192, Math.max(64, Math.round(h)));
     };
     if (gestureAlreadyPushed) {
@@ -930,6 +1062,8 @@ export class App implements EditorHost {
         this.beginGesture();
         this.project = p;
         this.selection.clear();
+        this.dirtyRegions = 'all';
+        this.refreshRegionStrips();
         this.applyEdit({ warp: true, pattern: true, structural: true });
         this.layoutViewport();
       },
@@ -942,43 +1076,53 @@ export class App implements EditorHost {
   /** Build all export artifacts in memory (also used by automated tests). */
   buildExportArtifacts(): {
     xml: string;
-    pfm: Uint8Array;
-    alpha: Uint8Array | null;
-    beta: Uint8Array | null;
+    files: Record<string, Uint8Array>;
     archive: Uint8Array;
   } {
     const p = this.project;
-    // High-density sampling mesh for export (256 -> 257x257 vertices).
-    this.renderer.setMesh(buildWarpMesh(p.bezier, p.fence, 256));
-    const uv = this.renderer.renderUVMap(p.outputW, p.outputH);
-    this.meshDirty = true; // display mesh needs a rebuild afterwards
-    this.requestRender();
-
-    const pfm = encodePFM(p.outputW, p.outputH, uv);
-    const alpha = hasBlend(p) ? encodeGrayPNG(p.outputW, p.outputH, bakeAlphaMap(p)) : null;
-    const beta = p.blackLevel > 0 ? encodeGrayPNG(p.outputW, p.outputH, bakeBetaMap(p)) : null;
+    const files: Record<string, Uint8Array> = {};
+    const entries: MpcdiRegionEntry[] = [];
+    for (const r of p.regions) {
+      const wPx = Math.max(1, Math.round(r.rect.w * p.outputW));
+      const hPx = Math.max(1, Math.round(r.rect.h * p.outputH));
+      // High-density sampling mesh, region-local positions for the FBO pass.
+      const mesh = buildRegionMesh(r, 256, false);
+      const uv = this.renderer.renderUVMap(mesh, [r.src.x, r.src.y, r.src.w, r.src.h], wPx, hPx);
+      const fn = safeFileName(r.id);
+      const warpPath = `warp_${fn}.pfm`;
+      files[warpPath] = encodePFM(wPx, hPx, uv);
+      let alphaPath: string | null = null;
+      let betaPath: string | null = null;
+      if (hasBlend(r)) {
+        alphaPath = `alpha_${fn}.png`;
+        files[alphaPath] = encodeGrayPNG(wPx, hPx, bakeAlphaMap(r, p, uv, wPx, hPx));
+      }
+      if (r.blackLevel > 0) {
+        betaPath = `beta_${fn}.png`;
+        files[betaPath] = encodeGrayPNG(wPx, hPx, bakeBetaMap(r, wPx, hPx));
+      }
+      entries.push({
+        id: r.id,
+        x: r.rect.x,
+        y: r.rect.y,
+        xsize: r.rect.w,
+        ysize: r.rect.h,
+        resW: wPx,
+        resH: hPx,
+        warpPath,
+        alphaPath,
+        betaPath,
+      });
+    }
     const xml = buildMpcdiXml({
       name: p.name,
-      regionId: p.regionId,
       width: p.outputW,
       height: p.outputH,
       date: new Date().toISOString(),
-      hasAlpha: alpha !== null,
-      hasBeta: beta !== null,
-      warpPath: 'warp.pfm',
-      alphaPath: 'alpha.png',
-      betaPath: 'beta.png',
+      regions: entries,
     });
-    const archive = buildArchive({
-      xml,
-      pfm,
-      alpha: alpha ?? undefined,
-      beta: beta ?? undefined,
-      warpPath: 'warp.pfm',
-      alphaPath: 'alpha.png',
-      betaPath: 'beta.png',
-    });
-    return { xml, pfm, alpha, beta, archive };
+    const archive = buildArchive(xml, files);
+    return { xml, files, archive };
   }
 
   async exportMpcdi(raw: boolean): Promise<void> {

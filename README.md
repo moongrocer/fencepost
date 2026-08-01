@@ -1,10 +1,29 @@
 # FENCEPOST
 
-Browser-based manual projector calibration with MPCDI v2 export. One window
-is both the editor and the clean projector feed: render a test pattern (or
-your own still frames) through a live-editable two-layer warp, dial in the
-geometry while watching the projection, then export a standards-conformant
-MPCDI v2.0 archive. Pure client-side TypeScript + WebGL2 — no server.
+Browser-based manual projector calibration with MPCDI v2 export — single
+projectors or multi-projector mosaic arrays. One window is both the editor
+and the clean projector feed: render a test pattern (or your own still
+frames) through a live-editable two-layer warp, dial in the geometry while
+watching the projection, then export a standards-conformant MPCDI v2.0
+archive. Pure client-side TypeScript + WebGL2 — no server.
+
+## Multi-projector (mosaic) mode
+
+Built for the NVIDIA Mosaic / Eyefinity workflow: one fullscreen window
+spans all projectors, each projector owning a butt-joined slice of the
+framebuffer. EXPORT → *Mosaic / Regions* → set columns / projector
+resolution / overlap → **Build Column Mosaic**. Each region (projector)
+gets its own warp, fence, and blend; `,` / `.` or the R1/R2/R3 strip (or
+clicking a slice) switches the active region.
+
+Content windows of adjacent regions overlap by the configured band — both
+projectors render that shared strip of the image, and matching blend ramps
+fade them against each other. **Blend is defined in content space and rides
+the warp**: a keystoned or curved seam automatically gets a matching
+keystoned/curved blend, and neighboring ramps meet at the same content
+coordinates (they sum to 1 across the band — unit tested). Export produces
+one MPCDI archive: one buffer, one region + fileset (PFM warp with
+absolute content-space UVs, alpha/beta PNGs) per projector.
 
 ```
 npm install

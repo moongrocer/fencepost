@@ -1,11 +1,13 @@
 /**
  * Shared handle geometry for the edit overlay and pointer hit-testing.
- * All positions are normalized output coordinates ((0,0) top-left).
+ * All positions are REGION-LOCAL normalized coordinates ((0,0) top-left of
+ * the active region's slice); the overlay / interaction layers map them
+ * into canvas space through the region's rect.
  *
  * Handle id scheme: 'b:i:j' bezier point, 'ft:i' / 'fb:i' fence top/bottom
  * edge point at post i, 'fp:i' fence post line.
  */
-import { ProjectState } from '../state/project';
+import { ProjectState, RegionState } from '../state/project';
 import { composedPoint } from '../warp/compose';
 
 export interface Handle {
@@ -17,10 +19,10 @@ export interface Handle {
   j: number;
 }
 
-export function collectHandles(p: ProjectState): Handle[] {
+export function collectHandles(region: RegionState, overlays: ProjectState['overlays']): Handle[] {
   const out: Handle[] = [];
-  if (p.overlays.bezier) {
-    const { cols, rows, points } = p.bezier;
+  if (overlays.bezier) {
+    const { cols, rows, points } = region.bezier;
     for (let j = 0; j < rows; j++) {
       for (let i = 0; i < cols; i++) {
         const k = (j * cols + i) * 2;
@@ -28,10 +30,10 @@ export function collectHandles(p: ProjectState): Handle[] {
       }
     }
   }
-  if (p.overlays.fence) {
-    p.fence.posts.forEach((post, i) => {
-      const t = composedPoint(p.bezier, p.fence, post.x, 0);
-      const b = composedPoint(p.bezier, p.fence, post.x, 1);
+  if (overlays.fence) {
+    region.fence.posts.forEach((post, i) => {
+      const t = composedPoint(region.bezier, region.fence, post.x, 0);
+      const b = composedPoint(region.bezier, region.fence, post.x, 1);
       out.push({ id: `ft:${i}`, kind: 'ftop', x: t[0], y: t[1], i, j: 0 });
       out.push({ id: `fb:${i}`, kind: 'fbot', x: b[0], y: b[1], i, j: 1 });
     });
@@ -39,26 +41,26 @@ export function collectHandles(p: ProjectState): Handle[] {
   return out;
 }
 
-/** The (warped) vertical line of post i, as a normalized polyline. */
-export function postPolyline(p: ProjectState, i: number, samples = 24): Array<[number, number]> {
-  const x = p.fence.posts[i].x;
+/** The (warped) vertical line of post i, as a region-local polyline. */
+export function postPolyline(region: RegionState, i: number, samples = 24): Array<[number, number]> {
+  const x = region.fence.posts[i].x;
   const pts: Array<[number, number]> = [];
   for (let s = 0; s <= samples; s++) {
-    pts.push(composedPoint(p.bezier, p.fence, x, s / samples));
+    pts.push(composedPoint(region.bezier, region.fence, x, s / samples));
   }
   return pts;
 }
 
-/** The warped top or bottom fence edge curve across the full width. */
+/** The warped top or bottom fence edge curve across the region's width. */
 export function edgePolyline(
-  p: ProjectState,
+  region: RegionState,
   edge: 'top' | 'bottom',
   samples = 64,
 ): Array<[number, number]> {
   const v = edge === 'top' ? 0 : 1;
   const pts: Array<[number, number]> = [];
   for (let s = 0; s <= samples; s++) {
-    pts.push(composedPoint(p.bezier, p.fence, s / samples, v));
+    pts.push(composedPoint(region.bezier, region.fence, s / samples, v));
   }
   return pts;
 }

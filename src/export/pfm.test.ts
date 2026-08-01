@@ -37,52 +37,55 @@ describe('PFM byte layout', () => {
   });
 });
 
-describe('mpcdi.xml structure', () => {
-  it('contains the required v2 2d-profile elements and attributes', () => {
+describe('mpcdi.xml structure (multi-region)', () => {
+  const region = (id: string, x: number, alpha: boolean) => ({
+    id,
+    x,
+    y: 0,
+    xsize: 1 / 3,
+    ysize: 1,
+    resW: 1200,
+    resH: 1920,
+    warpPath: `warp_${id}.pfm`,
+    alphaPath: alpha ? `alpha_${id}.png` : null,
+    betaPath: null,
+  });
+
+  it('contains the required v2 2d-profile elements for every region', () => {
     const xml = buildMpcdiXml({
       name: 'test',
-      regionId: 'region0',
-      width: 1920,
-      height: 1080,
-      date: '2026-06-12',
-      hasAlpha: true,
-      hasBeta: true,
-      warpPath: 'warp.pfm',
-      alphaPath: 'alpha.png',
-      betaPath: 'beta.png',
+      width: 3600,
+      height: 1920,
+      date: '2026-06-28',
+      regions: [region('region0', 0, true), region('region1', 1 / 3, true), region('region2', 2 / 3, false)],
     });
     expect(xml).toContain('version="2.0"');
     expect(xml).toContain('profile="2d"');
-    expect(xml).toContain('<buffer id="buffer0" Xresolution="1920" Yresolution="1080">');
-    expect(xml).toContain('region id="region0"');
-    expect(xml).toContain('xsize="1.0"');
-    expect(xml).toContain('<fileset region="region0">');
-    expect(xml).toContain('<geometryWarpFile>');
+    expect(xml).toContain('<buffer id="buffer0" Xresolution="3600" Yresolution="1920">');
+    for (const id of ['region0', 'region1', 'region2']) {
+      expect(xml).toContain(`region id="${id}"`);
+      expect(xml).toContain(`<fileset region="${id}">`);
+      expect(xml).toContain(`<path>warp_${id}.pfm</path>`);
+    }
+    expect(xml).toContain('Xresolution="1200" Yresolution="1920"');
+    expect(xml.split('<geometryWarpFile>').length).toBe(4); // 3 regions
+    expect(xml.split('<alphaMap bitdepth="8">').length).toBe(3); // 2 with alpha
+    expect(xml).not.toContain('betaMap');
     expect(xml).toContain('<geometricUnit>2d</geometricUnit>');
-    expect(xml).toContain('<path>warp.pfm</path>');
-    expect(xml).toContain('<alphaMap bitdepth="8">');
-    expect(xml).toContain('<betaMap bitdepth="8">');
     // balanced tags (cheap well-formedness sanity check)
-    for (const tag of ['MPCDI', 'display', 'buffer', 'files', 'fileset', 'geometryWarpFile']) {
+    for (const tag of ['MPCDI', 'display', 'buffer', 'files']) {
       expect(xml.split(`</${tag}>`).length).toBe(2);
     }
   });
 
-  it('omits alpha/beta when not present and escapes the region id', () => {
+  it('escapes region ids in XML', () => {
     const xml = buildMpcdiXml({
       name: 'x',
-      regionId: 'a<b&c',
       width: 800,
       height: 600,
       date: 'd',
-      hasAlpha: false,
-      hasBeta: false,
-      warpPath: 'warp.pfm',
-      alphaPath: 'alpha.png',
-      betaPath: 'beta.png',
+      regions: [{ ...region('r', 0, false), id: 'a<b&c' }],
     });
-    expect(xml).not.toContain('alphaMap');
-    expect(xml).not.toContain('betaMap');
     expect(xml).toContain('a&lt;b&amp;c');
   });
 });

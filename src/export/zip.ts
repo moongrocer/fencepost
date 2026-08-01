@@ -6,23 +6,12 @@
  */
 import { zipSync } from 'fflate';
 
-export interface ArchiveFiles {
-  xml: string;
-  pfm: Uint8Array;
-  alpha?: Uint8Array;
-  beta?: Uint8Array;
-  warpPath: string;
-  alphaPath: string;
-  betaPath: string;
-}
-
-export function buildArchive(f: ArchiveFiles): Uint8Array {
+/** Assemble a flat archive: mpcdi.xml + per-region data files at the root. */
+export function buildArchive(xml: string, files: Record<string, Uint8Array>): Uint8Array {
   const entries: Record<string, Uint8Array> = {
-    'mpcdi.xml': new TextEncoder().encode(f.xml),
-    [f.warpPath]: f.pfm,
+    'mpcdi.xml': new TextEncoder().encode(xml),
+    ...files,
   };
-  if (f.alpha) entries[f.alphaPath] = f.alpha;
-  if (f.beta) entries[f.betaPath] = f.beta;
   // PFM is float noise to DEFLATE; level 6 still wins on the PNGs/XML.
   return zipSync(entries, { level: 6 });
 }

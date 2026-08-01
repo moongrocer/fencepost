@@ -1,7 +1,12 @@
 /**
  * 2D overlay canvas: control point glyphs, fence posts/edges, selection
- * highlights, rubber-band. Layered above the WebGL canvas; the GL pass
- * draws the tessellated wireframe itself.
+ * highlights, rubber-band, and (in mosaic projects) region outlines.
+ * Layered above the WebGL canvas; the GL pass draws the tessellated
+ * wireframe itself.
+ *
+ * Only the ACTIVE region's handles are drawn/editable; other regions get
+ * a thin outline + id label. Handle positions are region-local and are
+ * mapped through the active region's rect here.
  *
  * Glyph language (deliberately distinct per layer):
  *   bezier points  — squares, steel blue; selected = LW pale yellow-green
@@ -30,17 +35,34 @@ const FENCE_SEL = '#ffd9a3';
 
 export function drawOverlay(ctx: CanvasRenderingContext2D, p: ProjectState, view: OverlayView): void {
   const { cw, ch, dpr } = view;
+  const region = p.regions[p.activeRegion];
+  const rr = region.rect;
   ctx.save();
   ctx.scale(dpr, dpr);
   ctx.clearRect(0, 0, cw, ch);
-  const X = (nx: number) => nx * cw;
-  const Y = (ny: number) => ny * ch;
-  // Default fence lines run exactly along the image border; inset them a
-  // pixel so the stroke isn't clipped by the canvas edge.
-  const CX = (nx: number) => Math.min(cw - 1, Math.max(1, nx * cw));
-  const CY = (ny: number) => Math.min(ch - 1, Math.max(1, ny * ch));
+  // region-local normalized -> canvas CSS px
+  const X = (nx: number) => (rr.x + nx * rr.w) * cw;
+  const Y = (ny: number) => (rr.y + ny * rr.h) * ch;
+  // Fence lines run along the region border; inset a pixel so the stroke
+  // isn't clipped by the region/canvas edge.
+  const CX = (nx: number) => Math.min((rr.x + rr.w) * cw - 1, Math.max(rr.x * cw + 1, X(nx)));
+  const CY = (ny: number) => Math.min((rr.y + rr.h) * ch - 1, Math.max(rr.y * ch + 1, Y(ny)));
   const fenceAlpha = view.activeLayer === 'bezier' ? 0.4 : 1;
   const bezierAlpha = view.activeLayer === 'fence' ? 0.35 : 1;
+
+  // region outlines + labels (only interesting with more than one region)
+  if (p.regions.length > 1) {
+    ctx.font = '10px "Lucida Console", monospace';
+    p.regions.forEach((reg, i) => {
+      const active = i === p.activeRegion;
+      const q = reg.rect;
+      ctx.strokeStyle = active ? 'rgba(216,217,163,0.9)' : 'rgba(160,160,160,0.4)';
+      ctx.lineWidth = active ? 1.5 : 1;
+      ctx.strokeRect(q.x * cw + 0.5, q.y * ch + 0.5, q.w * cw - 1, q.h * ch - 1);
+      ctx.fillStyle = active ? 'rgba(216,217,163,0.9)' : 'rgba(180,180,180,0.6)';
+      ctx.fillText(`R${i + 1} ${reg.id}`, q.x * cw + 5, q.y * ch + 13);
+    });
+  }
 
   const poly = (pts: Array<[number, number]>) => {
     ctx.beginPath();
@@ -50,18 +72,16 @@ export function drawOverlay(ctx: CanvasRenderingContext2D, p: ProjectState, view
 
   if (p.overlays.fence) {
     ctx.globalAlpha = fenceAlpha;
-    // fence edge curves
     ctx.lineWidth = view.activeLayer === 'fence' ? 1.5 : 1;
     ctx.strokeStyle = 'rgba(232,149,74,0.6)';
-    poly(edgePolyline(p, 'top'));
-    poly(edgePolyline(p, 'bottom'));
-    // posts
-    p.fence.posts.forEach((post, i) => {
+    poly(edgePolyline(region, 'top'));
+    poly(edgePolyline(region, 'bottom'));
+    region.fence.posts.forEach((post, i) => {
       const selected = view.selection.has(`fp:${i}`);
       ctx.strokeStyle = selected ? FENCE_SEL : 'rgba(232,149,74,0.85)';
       ctx.lineWidth = selected ? 2 : view.activeLayer === 'fence' ? 1.5 : 1;
       ctx.setLineDash(post.corner ? [] : [5, 4]);
-      poly(postPolyline(p, i));
+      poly(postPolyline(region, i));
       ctx.setLineDash([]);
     });
     ctx.globalAlpha = 1;
@@ -69,8 +89,7 @@ export function drawOverlay(ctx: CanvasRenderingContext2D, p: ProjectState, view
 
   if (p.overlays.bezier) {
     ctx.globalAlpha = bezierAlpha;
-    // control net lattice
-    const { cols, rows, points } = p.bezier;
+    const { cols, rows, points } = region.bezier;
     ctx.strokeStyle = 'rgba(111,159,216,0.35)';
     ctx.lineWidth = 1;
     for (let j = 0; j < rows; j++) {
@@ -93,7 +112,7 @@ export function drawOverlay(ctx: CanvasRenderingContext2D, p: ProjectState, view
   }
 
   // handles — the active layer's glyphs draw last (on top) at full alpha
-  const handles = collectHandles(p).sort((a, b) => {
+  const handles = collectHandles(region, p.overlays).sort((a, b) => {
     const act = (h: Handle) =>
       view.activeLayer === null ? 0 : (h.kind === 'bezier') === (view.activeLayer === 'bezier') ? 1 : 0;
     return act(a) - act(b);
@@ -103,7 +122,7 @@ export function drawOverlay(ctx: CanvasRenderingContext2D, p: ProjectState, view
     const selected = view.selection.has(h.id);
     const hovered = view.hoverId === h.id;
     const r = hovered ? 5 : 4;
-    // glyphs on the image border draw inset so they stay visible (the
+    // glyphs on the region border draw inset so they stay visible (the
     // hit-test still uses the true position; the offset is within reach)
     const x = Math.min(cw - r - 1, Math.max(r + 1, X(h.x)));
     const y = Math.min(ch - r - 1, Math.max(r + 1, Y(h.y)));

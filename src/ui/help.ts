@@ -6,6 +6,7 @@ const KEYS: Array<[string, string]> = [
   ['H', 'Hide / show floating palette (calibrate mode)'],
   ['Arrows', 'Nudge selection 4 px'],
   ['Shift+Arrows', 'Nudge selection 0.25 px (fine)'],
+  [', / .', 'Previous / next region (mosaic projects)'],
   ['1–7', 'Select test pattern (5 cycles white/gray/black)'],
   ['PgUp / PgDn', 'Cycle patterns and loaded stills'],
   ['B', 'Toggle bezier point overlay'],

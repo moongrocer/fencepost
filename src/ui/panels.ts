@@ -3,6 +3,8 @@
  * buttons and mini fields, grouped under etched separators. Content is
  * rebuilt wholesale on tab switch / undo / structural change, which keeps
  * every widget trivially in sync with the project state.
+ *
+ * WARP / FENCE / BLEND always edit the ACTIVE region.
  */
 import type { App } from '../app';
 import { PatternId } from '../state/project';
@@ -30,9 +32,9 @@ function patternsPanel(app: App): HTMLElement {
   const p = app.project;
   const root = el('div');
 
-  const patBtn = (label: string, id: PatternId, extra?: () => boolean) => {
+  const patBtn = (label: string, id: PatternId) => {
     const b = button(label, () => app.setPattern(id));
-    if (p.pattern.id === id && (!extra || extra())) b.classList.add('active');
+    if (p.pattern.id === id) b.classList.add('active');
     return b;
   };
 
@@ -146,10 +148,10 @@ function patternsPanel(app: App): HTMLElement {
 }
 
 function warpPanel(app: App): HTMLElement {
-  const p = app.project;
+  const r = app.region;
   const root = el('div');
 
-  let pendingDensity = Math.max(p.bezier.cols, 3);
+  let pendingDensity = Math.max(r.bezier.cols, 3);
   const density = miniField({
     label: 'Density',
     value: pendingDensity,
@@ -163,7 +165,7 @@ function warpPanel(app: App): HTMLElement {
   root.appendChild(
     group(
       'Grid Density',
-      el('div', 'lw-note', `Current: ${p.bezier.cols} × ${p.bezier.rows}`),
+      el('div', 'lw-note', `Current: ${r.bezier.cols} × ${r.bezier.rows}`),
       density.root,
       button('Apply Density (resets)', () => app.setDensity(pendingDensity)),
     ),
@@ -180,7 +182,7 @@ function warpPanel(app: App): HTMLElement {
 
   const ovBtn = (label: string, key: 'bezier' | 'fence' | 'wireframe') => {
     const b = button(label, () => app.toggleOverlay(key));
-    if (p.overlays[key]) b.classList.add('active');
+    if (app.project.overlays[key]) b.classList.add('active');
     return b;
   };
   root.appendChild(
@@ -195,8 +197,8 @@ function warpPanel(app: App): HTMLElement {
   root.appendChild(
     group(
       'Reset',
-      button('Reset Bezier', () => app.resetBezier()),
-      el('div', 'lw-note', 'Nudge: arrows = 4 px, Shift+arrows = 0.25 px.'),
+      button('Reset Bezier (region)', () => app.resetBezier()),
+      el('div', 'lw-note', 'Nudge: arrows = 4 px, Shift+arrows = 0.25 px (projector px).'),
     ),
   );
   return root;
@@ -204,9 +206,12 @@ function warpPanel(app: App): HTMLElement {
 
 function fencePanel(app: App): HTMLElement {
   const p = app.project;
+  const region = app.region;
   const root = el('div');
   const sel = app.selectedPostIndex();
-  const post = sel !== null ? p.fence.posts[sel] : null;
+  const post = sel !== null ? region.fence.posts[sel] : null;
+  const regionWpx = region.rect.w * p.outputW;
+  const regionHpx = region.rect.h * p.outputH;
 
   const prevNext = el('div', 'lw-row');
   prevNext.appendChild(button('◂ Prev', () => app.selectPost(-1)));
@@ -222,7 +227,7 @@ function fencePanel(app: App): HTMLElement {
         'div',
         'lw-note',
         sel !== null
-          ? `Selected post ${sel} of ${p.fence.posts.length - 1}${sel === 0 || sel === p.fence.posts.length - 1 ? ' (boundary)' : ''}. Up/Down nudges the whole post; drag diamonds for top/bottom.`
+          ? `Selected post ${sel} of ${region.fence.posts.length - 1}${sel === 0 || sel === region.fence.posts.length - 1 ? ' (boundary)' : ''}. Up/Down nudges the whole post; drag diamonds for top/bottom.`
           : 'Click a post line / edge diamond, or use Prev/Next.',
       ),
     ),
@@ -231,40 +236,40 @@ function fencePanel(app: App): HTMLElement {
   if (post && sel !== null) {
     const px = miniField({
       label: 'Post X (px)',
-      value: post.x * p.outputW,
+      value: post.x * regionWpx,
       min: 0,
-      max: p.outputW,
+      max: regionWpx,
       step: 1,
       decimals: 2,
       onGestureStart: () => app.beginGesture(),
       onChange: (v) => {
-        app.movePostTo(sel, v / app.project.outputW);
+        app.movePostTo(sel, v / regionWpx);
         app.applyEdit({ warp: true });
       },
     });
     const pt = miniField({
       label: 'Top Y (px)',
-      value: post.top * p.outputH,
-      min: -p.outputH,
-      max: p.outputH * 2,
+      value: post.top * regionHpx,
+      min: -regionHpx,
+      max: regionHpx * 2,
       step: 0.25,
       decimals: 2,
       onGestureStart: () => app.beginGesture(),
       onChange: (v) => {
-        app.project.fence.posts[sel].top = v / app.project.outputH;
+        app.region.fence.posts[sel].top = v / regionHpx;
         app.applyEdit({ warp: true });
       },
     });
     const pb = miniField({
       label: 'Bottom Y (px)',
-      value: post.bottom * p.outputH,
-      min: -p.outputH,
-      max: p.outputH * 2,
+      value: post.bottom * regionHpx,
+      min: -regionHpx,
+      max: regionHpx * 2,
       step: 0.25,
       decimals: 2,
       onGestureStart: () => app.beginGesture(),
       onChange: (v) => {
-        app.project.fence.posts[sel].bottom = v / app.project.outputH;
+        app.region.fence.posts[sel].bottom = v / regionHpx;
         app.applyEdit({ warp: true });
       },
     });
@@ -274,7 +279,7 @@ function fencePanel(app: App): HTMLElement {
   root.appendChild(
     group(
       'Reset',
-      button('Reset Fence', () => app.resetFence()),
+      button('Reset Fence (region)', () => app.resetFence()),
       el(
         'div',
         'lw-note',
@@ -286,32 +291,32 @@ function fencePanel(app: App): HTMLElement {
 }
 
 function blendPanel(app: App): HTMLElement {
-  const p = app.project;
+  const region = app.region;
   const root = el('div');
   const edges = ['left', 'right', 'top', 'bottom'] as const;
   for (const e of edges) {
     const width = miniField({
       label: 'Width (px)',
-      value: p.blend[e].width,
+      value: region.blend[e].width,
       min: 0,
-      max: Math.max(p.outputW, p.outputH),
+      max: Math.max(app.project.outputW, app.project.outputH),
       step: 1,
       onGestureStart: () => app.beginGesture(),
       onChange: (v) => {
-        app.project.blend[e].width = Math.round(v);
+        app.region.blend[e].width = Math.round(v);
         app.applyEdit({});
       },
     });
     const gamma = miniField({
       label: 'Gamma',
-      value: p.blend[e].gamma,
+      value: region.blend[e].gamma,
       min: 0.1,
       max: 5,
       step: 0.05,
       decimals: 2,
       onGestureStart: () => app.beginGesture(),
       onChange: (v) => {
-        app.project.blend[e].gamma = v;
+        app.region.blend[e].gamma = v;
         app.applyEdit({});
       },
     });
@@ -319,14 +324,14 @@ function blendPanel(app: App): HTMLElement {
   }
   const lift = miniField({
     label: 'Lift',
-    value: p.blackLevel,
+    value: region.blackLevel,
     min: 0,
     max: 0.5,
     step: 0.005,
     decimals: 3,
     onGestureStart: () => app.beginGesture(),
     onChange: (v) => {
-      app.project.blackLevel = v;
+      app.region.blackLevel = v;
       app.applyEdit({});
     },
   });
@@ -334,7 +339,11 @@ function blendPanel(app: App): HTMLElement {
     group(
       'Black Level',
       lift.root,
-      el('div', 'lw-note', 'Uniform lift for dark-scene uniformity checks; exports as the beta map.'),
+      el(
+        'div',
+        'lw-note',
+        'Widths are CONTENT pixels from the region’s content-window edge — the ramp rides the warp, so keystoned/curved seams get matching blends. Neighboring regions built by the mosaic tool share ramp widths. Lift exports as the beta map.',
+      ),
     ),
   );
   return root;
@@ -342,7 +351,47 @@ function blendPanel(app: App): HTMLElement {
 
 function exportPanel(app: App): HTMLElement {
   const p = app.project;
+  const region = app.region;
   const root = el('div');
+
+  // ---- mosaic / regions ----
+  let mCols = Math.max(2, p.regions.length);
+  let mW = 1200;
+  let mH = 1920;
+  let mOv = 200;
+  const colsF = miniField({ label: 'Columns', value: mCols, min: 2, max: 8, step: 1, onChange: (v) => (mCols = Math.round(v)) });
+  const wF = miniField({ label: 'Proj W', value: mW, min: 64, max: 8192, step: 1, onChange: (v) => (mW = Math.round(v)) });
+  const hF = miniField({ label: 'Proj H', value: mH, min: 64, max: 8192, step: 1, onChange: (v) => (mH = Math.round(v)) });
+  const ovF = miniField({ label: 'Overlap px', value: mOv, min: 0, max: 2000, step: 1, onChange: (v) => (mOv = Math.round(v)) });
+  root.appendChild(
+    group(
+      'Mosaic / Regions',
+      el('div', 'lw-note', `Regions: ${p.regions.length} (active R${p.activeRegion + 1} "${region.id}"). , / . switch.`),
+      colsF.root,
+      wF.root,
+      hF.root,
+      ovF.root,
+      button('Build Column Mosaic', () => app.buildMosaic(mCols, mW, mH, mOv)),
+      button('Single Region (reset)', () => app.makeSingleRegion()),
+      el(
+        'div',
+        'lw-note',
+        'Butt-joined framebuffer slices (one fullscreen window on a Mosaic/Eyefinity desktop); content windows overlap by the given band and get matching blend ramps.',
+      ),
+    ),
+  );
+
+  root.appendChild(
+    group(
+      'Metadata',
+      textField('Name', p.name, (v) =>
+        app.edit(() => {
+          app.project.name = v || 'fencepost-project';
+        }, {}),
+      ),
+      textField(`Region ID (R${p.activeRegion + 1})`, region.id, (v) => app.setRegionId(v)),
+    ),
+  );
 
   const presets: Array<[string, number, number]> = [
     ['1920 × 1080', 1920, 1080],
@@ -358,7 +407,7 @@ function exportPanel(app: App): HTMLElement {
     label: 'Width',
     value: p.outputW,
     min: 64,
-    max: 8192,
+    max: 16384,
     step: 1,
     onGestureStart: () => app.beginGesture(),
     onChange: (v) => app.setResolution(Math.round(v), app.project.outputH, true),
@@ -372,23 +421,7 @@ function exportPanel(app: App): HTMLElement {
     onGestureStart: () => app.beginGesture(),
     onChange: (v) => app.setResolution(app.project.outputW, Math.round(v), true),
   });
-  root.appendChild(group('Output Resolution', ...presetBtns, wf.root, hf.root));
-
-  root.appendChild(
-    group(
-      'Metadata',
-      textField('Name', p.name, (v) =>
-        app.edit(() => {
-          app.project.name = v || 'fencepost-project';
-        }, {}),
-      ),
-      textField('Region ID', p.regionId, (v) =>
-        app.edit(() => {
-          app.project.regionId = v || 'region0';
-        }, {}),
-      ),
-    ),
-  );
+  root.appendChild(group('Framebuffer Resolution', ...presetBtns, wf.root, hf.root));
 
   root.appendChild(
     group(
@@ -398,7 +431,7 @@ function exportPanel(app: App): HTMLElement {
       el(
         'div',
         'lw-note',
-        'Profile 2d, level 1. PFM warp (float32 LE, bottom-up, absolute UV), PNG alpha/beta maps.',
+        'Profile 2d, level 1. One buffer, one fileset per region: PFM warp (absolute content-space UV), PNG alpha/beta maps.',
       ),
     ),
   );
@@ -409,7 +442,7 @@ function exportPanel(app: App): HTMLElement {
       button('Save Project (Ctrl+S)', () => app.saveProject()),
       button('Load Project…', () => app.loadProjectFile()),
       button('Reset All', () => app.resetAll()),
-      el('div', 'lw-note', 'Autosaves to localStorage on every change.'),
+      el('div', 'lw-note', 'Autosaves to localStorage on every change. v1 projects load and migrate.'),
     ),
   );
   return root;

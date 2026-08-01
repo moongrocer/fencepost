@@ -1,19 +1,26 @@
 /**
  * Warp composition and mesh sampling.
  *
- * Pipeline: source UV -> fence transform -> bezier transform -> screen.
- * The composed warp is sampled into a regular tessellated mesh whose vertex
- * positions are warped output coordinates and whose texcoords are the
- * original source UVs. The same mesh drives both on-screen rendering and
- * the GPU rasterization that produces the per-pixel UV map for PFM export.
+ * Pipeline per region: region-local UV -> fence transform -> bezier
+ * transform -> region-local warped position -> (optionally) placed into
+ * the region's slice of the mosaic framebuffer.
+ *
+ * Mesh vertex data:
+ *   - positions: warped coordinates. With placeInCanvas=true they are
+ *     mosaic-canvas fractions (for the live display, all regions drawn
+ *     into one canvas); with false they stay region-local [0,1] (for the
+ *     per-region UV-export FBO at the region's own resolution).
+ *   - uvs: the ORIGINAL region-local UVs. The shader derives the shared
+ *     content-space UV via the region's src window (uSrc uniform), and the
+ *     blend alpha from the same local UV — which is what makes blend
+ *     ramps follow the warp.
  */
 import { BezierGridState, evalBezier } from './bezier';
 import { FenceState, fenceTransform } from './fence';
+import { RegionState } from '../state/project';
 
 export interface WarpMesh {
-  /** (tess+1)^2 vertices, xy pairs in normalized output coords */
   positions: Float32Array;
-  /** matching source UVs */
   uvs: Float32Array;
   indices: Uint32Array;
   tess: number;
@@ -29,22 +36,24 @@ export function composedPoint(
   return evalBezier(bezier, f[0], f[1]);
 }
 
-export function buildWarpMesh(
-  bezier: BezierGridState,
-  fence: FenceState,
-  tess: number,
-): WarpMesh {
+export function buildRegionMesh(region: RegionState, tess: number, placeInCanvas: boolean): WarpMesh {
   const n = tess + 1;
   const positions = new Float32Array(n * n * 2);
   const uvs = new Float32Array(n * n * 2);
+  const { rect } = region;
   for (let r = 0; r < n; r++) {
     const v = r / tess;
     for (let c = 0; c < n; c++) {
       const u = c / tess;
-      const p = composedPoint(bezier, fence, u, v);
+      const p = composedPoint(region.bezier, region.fence, u, v);
       const k = (r * n + c) * 2;
-      positions[k] = p[0];
-      positions[k + 1] = p[1];
+      if (placeInCanvas) {
+        positions[k] = rect.x + p[0] * rect.w;
+        positions[k + 1] = rect.y + p[1] * rect.h;
+      } else {
+        positions[k] = p[0];
+        positions[k + 1] = p[1];
+      }
       uvs[k] = u;
       uvs[k + 1] = v;
     }
