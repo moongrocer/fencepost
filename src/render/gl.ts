@@ -41,8 +41,16 @@ uniform vec4 uBG;     // blend gammas
 uniform float uLift;
 in vec2 vUV;          // region-local uv
 out vec4 outColor;
+// MUST stay identical to edgeFalloff() in render/blend.ts — normalized
+// power ramp, so neighbouring regions' ramps sum to 1 at every gamma.
 float edgeF(float d, float w, float g) {
-  return w <= 0.0 ? 1.0 : pow(clamp(d / w, 0.0, 1.0), g);
+  if (w <= 0.0) return 1.0;
+  float t = clamp(d / w, 0.0, 1.0);
+  if (t <= 0.0) return 0.0;
+  if (t >= 1.0) return 1.0;
+  float a = pow(t, g);
+  float b = pow(1.0 - t, g);
+  return a / (a + b);
 }
 void main() {
   vec2 cuv = uSrc.xy + vUV * uSrc.zw;

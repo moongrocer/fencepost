@@ -9,8 +9,10 @@
  * region-local and get mapped through the region's rect.
  */
 import { ProjectState, RegionState } from '../state/project';
+import { composedPoint, regionAspect, residualOffset } from '../warp/compose';
 import { setPostX } from '../warp/fence';
-import { collectHandles, distToPolyline, Handle, postPolyline } from './handles';
+import { cylinderProject, invertMap, UNIT_CORNERS } from '../warp/model';
+import { collectHandles, distToPolyline, Handle, Layer, layerOf, postPolyline } from './handles';
 
 export interface EditorHost {
   readonly project: ProjectState;
@@ -20,11 +22,11 @@ export interface EditorHost {
   viewSize(): { cw: number; ch: number };
   /**
    * Which warp layer the UI is focused on (WARP tab -> bezier, FENCE tab ->
-   * fence). Default fence handles coincide exactly with bezier corner
-   * points, so the active layer wins hit-test ties — the tab decides what
-   * you grab.
+   * fence, MODEL tab -> homography corners). Default fence handles coincide
+   * exactly with bezier corner points (and homography corners), so the
+   * active layer wins hit-test ties — the tab decides what you grab.
    */
-  activeLayer(): 'bezier' | 'fence' | null;
+  activeLayer(): Layer | null;
   setActiveRegion(i: number): void;
   /** push an undo snapshot (called once per drag gesture, at first move) */
   beginGesture(): void;
@@ -37,8 +39,8 @@ export interface EditorHost {
   setCursorInfo(text: string): void;
 }
 
-const HIT_PX = 8;
-const POST_HIT_PX = 6;
+const HIT_PX = 12;
+const POST_HIT_PX = 8;
 
 type DragMode =
   | { kind: 'handles'; starts: Map<string, { x: number; y: number }> }
@@ -66,6 +68,10 @@ export class InteractionController {
     return this.host.project.regions[this.host.project.activeRegion];
   }
 
+  private aspect(): number {
+    return regionAspect(this.host.project, this.region());
+  }
+
   private toLocal(e: PointerEvent): { x: number; y: number } {
     const r = this.canvas.getBoundingClientRect();
     return { x: e.clientX - r.left, y: e.clientY - r.top };
@@ -80,13 +86,12 @@ export class InteractionController {
 
   private handleAt(x: number, y: number): Handle | null {
     const layer = this.host.activeLayer();
-    const preferred = (h: Handle) =>
-      layer === null ? true : layer === 'bezier' ? h.kind === 'bezier' : h.kind !== 'bezier';
+    const preferred = (h: Handle) => layer === null || layerOf(h.kind) === layer;
     let bestPref: Handle | null = null;
     let bestPrefD = HIT_PX;
     let bestOther: Handle | null = null;
     let bestOtherD = HIT_PX;
-    for (const h of collectHandles(this.region(), this.host.project.overlays)) {
+    for (const h of collectHandles(this.region(), this.host.project.overlays, this.aspect())) {
       const c = this.handleCss(h);
       const d = Math.hypot(c.x - x, c.y - y);
       if (preferred(h)) {
@@ -106,7 +111,7 @@ export class InteractionController {
     if (!this.host.project.overlays.fence) return null;
     const posts = this.region().fence.posts;
     for (let i = 0; i < posts.length; i++) {
-      const pts = postPolyline(this.region(), i).map((pt) => {
+      const pts = postPolyline(this.region(), this.aspect(), i).map((pt) => {
         const c = this.handleCss({ x: pt[0], y: pt[1] });
         return [c.x, c.y] as [number, number];
       });
@@ -144,7 +149,7 @@ export class InteractionController {
 
     let h = this.handleAt(x, y);
     // In fence mode, a post line beats a (fallback) bezier handle.
-    if (this.host.activeLayer() === 'fence' && (!h || h.kind === 'bezier')) {
+    if (this.host.activeLayer() === 'fence' && (!h || layerOf(h.kind) !== 'fence')) {
       const pi = this.postAt(x, y);
       if (pi !== null) {
         if (!e.shiftKey) sel.clear();
@@ -163,7 +168,7 @@ export class InteractionController {
       }
       const starts = new Map<string, { x: number; y: number }>();
       for (const id of sel) {
-        const v = readHandleValue(this.region(), id);
+        const v = readHandleValue(this.region(), this.aspect(), id);
         if (v) starts.set(id, v);
       }
       this.drag = { kind: 'handles', starts };
@@ -180,11 +185,33 @@ export class InteractionController {
       return;
     }
 
-    // Empty space in ANOTHER region's slice: switch active region.
+    // Click landed in ANOTHER region's slice: switch to it. If the click
+    // was actually ON one of that region's handles, grab it in the same
+    // gesture — otherwise the first click silently selects nothing and the
+    // arrow keys appear dead.
     const { cw, ch } = this.host.viewSize();
     const ri = this.regionAtPoint(x / cw, y / ch);
     if (ri !== null && ri !== this.host.project.activeRegion) {
       this.host.setActiveRegion(ri);
+      const h2 = this.handleAt(x, y); // now hit-tests the newly active region
+      if (h2) {
+        sel.clear();
+        sel.add(h2.id);
+        const starts = new Map<string, { x: number; y: number }>();
+        const v = readHandleValue(this.region(), this.aspect(), h2.id);
+        if (v) starts.set(h2.id, v);
+        this.drag = { kind: 'handles', starts };
+        this.host.selectionChanged();
+        return;
+      }
+      const pi2 = this.postAt(x, y);
+      if (pi2 !== null) {
+        sel.clear();
+        sel.add(`fp:${pi2}`);
+        this.drag = { kind: 'post', index: pi2, startX: this.region().fence.posts[pi2].x };
+        this.host.selectionChanged();
+        return;
+      }
       this.drag = null;
       return;
     }
@@ -227,7 +254,7 @@ export class InteractionController {
       if (!this.moved) return;
       this.ensureGesture();
       for (const [id, start] of this.drag.starts) {
-        writeHandleValue(region, id, start, dxN, dyN);
+        writeHandleValue(region, this.aspect(), id, start, dxN, dyN);
       }
       this.host.warpEdited(true);
     } else if (this.drag.kind === 'post') {
@@ -253,7 +280,7 @@ export class InteractionController {
         const sel = this.host.selection;
         sel.clear();
         for (const id of this.drag.base) sel.add(id);
-        for (const h of collectHandles(this.region(), this.host.project.overlays)) {
+        for (const h of collectHandles(this.region(), this.host.project.overlays, this.aspect())) {
           const c = this.handleCss(h);
           if (c.x >= xMin && c.x <= xMax && c.y >= yMin && c.y <= yMax) sel.add(h.id);
         }
@@ -273,8 +300,20 @@ export class InteractionController {
   };
 }
 
-export function readHandleValue(region: RegionState, id: string): { x: number; y: number } | null {
+/**
+ * The draggable value behind a handle. Bezier/fence values are the raw
+ * stored numbers (drags add deltas to them). A homography corner's value
+ * is where the image corner currently LANDS, so a drag moves the picture's
+ * corner to the mouse whatever sits downstream.
+ */
+export function readHandleValue(region: RegionState, aspect: number, id: string): { x: number; y: number } | null {
   const parts = id.split(':');
+  if (parts[0] === 'h') {
+    const c = UNIT_CORNERS[+parts[1]];
+    if (!c) return null;
+    const p = composedPoint(region, aspect, c[0], c[1]);
+    return { x: p[0], y: p[1] };
+  }
   if (parts[0] === 'b') {
     const i = +parts[1];
     const j = +parts[2];
@@ -296,12 +335,27 @@ export function readHandleValue(region: RegionState, id: string): { x: number; y
 /** Apply a drag delta to one handle. Fence edge points move vertically only. */
 export function writeHandleValue(
   region: RegionState,
+  aspect: number,
   id: string,
   start: { x: number; y: number },
   dxN: number,
   dyN: number,
 ): void {
   const parts = id.split(':');
+  if (parts[0] === 'h') {
+    const i = +parts[1];
+    const c = UNIT_CORNERS[i];
+    if (!c) return;
+    // composed = cyl(H(c)) + D(c)  →  H(c) = cyl⁻¹(target − D(c))
+    const d = residualOffset(region, c[0], c[1]);
+    const tx = start.x + dxN - d[0];
+    const ty = start.y + dyN - d[1];
+    const cyl = region.cylinder;
+    region.homography.corners[i] = cyl.enabled
+      ? invertMap((x, y) => cylinderProject(cyl, aspect, x, y), tx, ty, region.homography.corners[i])
+      : [tx, ty];
+    return;
+  }
   if (parts[0] === 'b') {
     const i = +parts[1];
     const j = +parts[2];

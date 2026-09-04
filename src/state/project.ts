@@ -23,6 +23,7 @@
  */
 import { BezierGridState, createBezierGrid } from '../warp/bezier';
 import { createFence, FenceState } from '../warp/fence';
+import { CylinderState, defaultCylinder, defaultHomography, HomographyState } from '../warp/model';
 
 export type PatternId =
   | 'grid'
@@ -54,6 +55,15 @@ export interface RegionState {
   rect: RegionRect;
   /** window of shared content space this projector displays (fractions) */
   src: RegionRect;
+  /**
+   * Warp stack: homography → cylinder (parametric, model.ts) with the
+   * fence → bezier residual displaced on top (compose.ts). Each layer has
+   * its own enabled flag; toggling never touches the layer's parameters.
+   */
+  homography: HomographyState;
+  cylinder: CylinderState;
+  /** layer 3 (fence + bezier) on/off */
+  residualEnabled: boolean;
   bezier: BezierGridState;
   fence: FenceState;
   blend: { left: BlendEdge; right: BlendEdge; top: BlendEdge; bottom: BlendEdge };
@@ -94,6 +104,9 @@ export function defaultRegion(id: string, rect: RegionRect, src: RegionRect): Re
     id,
     rect,
     src,
+    homography: defaultHomography(),
+    cylinder: defaultCylinder(),
+    residualEnabled: true,
     bezier: createBezierGrid(5, 5),
     fence: createFence(),
     blend: noBlend(),
@@ -179,6 +192,14 @@ function validateRegion(r: RegionState, label: string): void {
   if (!r.fence || !Array.isArray(r.fence.posts) || r.fence.posts.length < 2) {
     throw new Error(`Invalid fence data (${label})`);
   }
+  const hc = r.homography?.corners;
+  if (!Array.isArray(hc) || hc.length !== 4 || hc.some((c) => !Array.isArray(c) || !isNum(c[0]) || !isNum(c[1]))) {
+    throw new Error(`Invalid homography data (${label})`);
+  }
+  const cy = r.cylinder;
+  if (!cy || !isNum(cy.radius) || cy.radius <= 0 || !Array.isArray(cy.pos) || cy.pos.length !== 3) {
+    throw new Error(`Invalid cylinder data (${label})`);
+  }
   for (const rect of [r.rect, r.src]) {
     if (!rect || !isNum(rect.x) || !isNum(rect.y) || !isNum(rect.w) || !isNum(rect.h) || rect.w <= 0 || rect.h <= 0) {
       throw new Error(`Invalid region rect (${label})`);
@@ -223,9 +244,15 @@ export function deserializeProject(json: string): ProjectState {
     overlays: { ...d.overlays, ...(raw.overlays ?? {}) },
   } as ProjectState;
   if (!Array.isArray(p.regions) || p.regions.length === 0) throw new Error('Project has no regions');
+  // Pre-model-stack projects have no homography/cylinder: they load with
+  // both disabled and the old fence→bezier chain as the residual, so
+  // nothing changes visually. Promotion to layer 1 is the explicit
+  // "Upgrade" action in the MODEL tab — never silent.
   p.regions = p.regions.map((r, i) => ({
     ...defaultRegion(r.id ?? `region${i}`, r.rect, r.src),
     ...r,
+    homography: { ...defaultHomography(), ...(r.homography ?? {}) },
+    cylinder: { ...defaultCylinder(), ...(r.cylinder ?? {}) },
     blend: { ...noBlend(), ...(r.blend ?? {}) },
   }));
   p.regions.forEach((r, i) => validateRegion(r, r.id ?? `#${i}`));

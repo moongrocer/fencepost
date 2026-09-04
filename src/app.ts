@@ -28,12 +28,16 @@ import {
 } from './state/project';
 import { UndoStack } from './state/undo';
 import { createBezierGrid, subdivideAfterColumn, subdivideAfterRow } from './warp/bezier';
-import { buildRegionMesh } from './warp/compose';
+import { buildRegionMesh, regionAspect } from './warp/compose';
 import { addPost, createFence, removePost, setPostX, widestGapMid } from './warp/fence';
+import { defaultCylinder, defaultHomography } from './warp/model';
+import { laplacianSmooth, refitPatch, upgradeToHomography } from './warp/refit';
 import { button, el } from './ui/dom';
 import { buildHelpOverlay } from './ui/help';
-import { EditorHost, InteractionController, readHandleValue } from './ui/interaction';
+import { alertModal, confirmModal, modalOpen } from './ui/modal';
+import { EditorHost, InteractionController, readHandleValue, writeHandleValue } from './ui/interaction';
 import { drawOverlay } from './ui/overlay';
+import { Layer } from './ui/handles';
 import { renderPanel, TabId, TABS } from './ui/panels';
 
 export interface EditOpts {
@@ -45,6 +49,8 @@ export interface EditOpts {
 
 const FULL_TESS = 128;
 const DRAG_TESS = 64;
+/** consecutive arrow-key nudges within this window share one undo snapshot */
+const NUDGE_COALESCE_MS = 700;
 const PATTERN_CYCLE: Array<{ id: PatternId; solid?: 'white' | 'gray' | 'black' }> = [
   { id: 'grid' },
   { id: 'crosshatch' },
@@ -97,6 +103,8 @@ export class App implements EditorHost {
   private rafPending = false;
   private cssW = 0;
   private cssH = 0;
+  private nudgeRunUntil = 0;
+  private nudgeRunKey = '';
 
   constructor(root: HTMLElement) {
     this.project = loadAutosave() ?? defaultProject();
@@ -213,10 +221,14 @@ export class App implements EditorHost {
   }
 
   /** Replace the project's regions with an N-column mosaic. */
-  buildMosaic(cols: number, projW: number, projH: number, overlapPx: number): void {
-    if (!confirm(`Build a ${cols}-column mosaic (${cols}×${projW}×${projH}, ${overlapPx}px overlap)? All region warps reset.`)) {
-      return;
-    }
+  async buildMosaic(cols: number, projW: number, projH: number, overlapPx: number): Promise<void> {
+    const ok = await confirmModal(
+      `Build a ${cols}-column mosaic (${cols} × ${projW} × ${projH}, ${overlapPx} px overlap)?\n` +
+        'All region warps reset.',
+      'BUILD MOSAIC',
+      'Build',
+    );
+    if (!ok) return;
     this.edit(
       () => {
         const m = mosaicColumns(cols, projW, projH, overlapPx);
@@ -234,8 +246,9 @@ export class App implements EditorHost {
   }
 
   /** Collapse back to a single full-frame region. */
-  makeSingleRegion(): void {
-    if (!confirm('Collapse to a single full-frame region? All region warps reset.')) return;
+  async makeSingleRegion(): Promise<void> {
+    if (!(await confirmModal('Collapse to a single full-frame region? All region warps reset.', 'SINGLE REGION')))
+      return;
     this.edit(
       () => {
         this.project.regions = [
@@ -450,11 +463,11 @@ export class App implements EditorHost {
     }
     this.renderer.setRegionCount(p.regions.length);
     if (this.dirtyRegions === 'all') {
-      p.regions.forEach((r, i) => this.renderer.setRegionMesh(i, buildRegionMesh(r, FULL_TESS, true)));
+      p.regions.forEach((r, i) => this.renderer.setRegionMesh(i, buildRegionMesh(r, regionAspect(p, r), FULL_TESS, true)));
     } else {
       for (const i of this.dirtyRegions) {
         const r = p.regions[i];
-        if (r) this.renderer.setRegionMesh(i, buildRegionMesh(r, this.currentTess, true));
+        if (r) this.renderer.setRegionMesh(i, buildRegionMesh(r, regionAspect(p, r), this.currentTess, true));
       }
     }
     this.dirtyRegions = new Set();
@@ -491,6 +504,24 @@ export class App implements EditorHost {
 
   beginGesture(): void {
     this.undoStack.push(this.snapshot());
+    this.nudgeRunUntil = 0; // any other edit ends the current nudge run
+  }
+
+  /**
+   * Undo snapshot for arrow-key nudging. A burst of key repeats is ONE
+   * gesture — otherwise holding an arrow buries the stack under hundreds
+   * of 4 px steps and undo becomes useless.
+   */
+  private beginNudgeGesture(): void {
+    const now = performance.now();
+    const key = `${this.project.activeRegion}|${Array.from(this.selection).sort().join(',')}`;
+    if (now < this.nudgeRunUntil && key === this.nudgeRunKey) {
+      this.nudgeRunUntil = now + NUDGE_COALESCE_MS;
+      return;
+    }
+    this.undoStack.push(this.snapshot());
+    this.nudgeRunKey = key;
+    this.nudgeRunUntil = now + NUDGE_COALESCE_MS;
   }
 
   endGesture(): void {
@@ -539,6 +570,12 @@ export class App implements EditorHost {
     this.updateInfo();
   }
 
+  /** Replace the whole project from serialized JSON (remote bridge); undoable. */
+  applyProjectJson(json: string): void {
+    this.beginGesture();
+    this.restoreSnapshot(json);
+  }
+
   undo(): void {
     const s = this.undoStack.undo(this.snapshot());
     if (s !== null) this.restoreSnapshot(s);
@@ -556,7 +593,9 @@ export class App implements EditorHost {
       const valid =
         parts[0] === 'b'
           ? +parts[1] < r.bezier.cols && +parts[2] < r.bezier.rows
-          : +parts[1] < r.fence.posts.length;
+          : parts[0] === 'h'
+            ? +parts[1] < 4 && r.homography.enabled
+            : +parts[1] < r.fence.posts.length;
       if (!valid) this.selection.delete(id);
     }
   }
@@ -579,11 +618,11 @@ export class App implements EditorHost {
     let selText = `sel ${this.selection.size}`;
     if (this.selection.size === 1) {
       const id = this.selection.values().next().value as string;
-      const v = readHandleValue(r, id);
+      const v = readHandleValue(r, regionAspect(p, r), id);
       if (v) {
         const rw = r.rect.w * p.outputW;
         const rh = r.rect.h * p.outputH;
-        if (id.startsWith('b:')) {
+        if (id.startsWith('b:') || id.startsWith('h:')) {
           selText = `sel ${id} @ ${(v.x * rw).toFixed(2)}, ${(v.y * rh).toFixed(2)} px`;
         } else if (id.startsWith('fp:')) {
           selText = `sel post ${id.slice(3)} @ x ${(v.x * rw).toFixed(2)} px`;
@@ -597,14 +636,32 @@ export class App implements EditorHost {
     const regionInfo =
       p.regions.length > 1 ? `R${p.activeRegion + 1}/${p.regions.length} ${r.id} | ` : '';
     this.info.density.textContent = `${regionInfo}grid ${r.bezier.cols}×${r.bezier.rows} | posts ${r.fence.posts.length}`;
-    this.info.pattern.textContent = `${patternLabel(p, this.stills)} | ${p.outputW}×${p.outputH}`;
+    // 1:1 check. In calibrate mode the canvas is meant to map one
+    // framebuffer pixel to one projector pixel; if it doesn't, the image
+    // on the wall is resampled and any camera calibration made at a
+    // different window geometry no longer lines up. Say so loudly rather
+    // than letting someone calibrate against a scaled view.
+    const dpr = window.devicePixelRatio || 1;
+    const devW = Math.round(this.cssW * dpr);
+    const devH = Math.round(this.cssH * dpr);
+    const off = Math.abs(devW - p.outputW) > 1 || Math.abs(devH - p.outputH) > 1;
+    this.info.pattern.textContent =
+      `${patternLabel(p, this.stills)} | ${p.outputW}×${p.outputH}` +
+      (this.calibrateMode && off ? `  ⚠ NOT 1:1 — showing ${devW}×${devH}` : '');
+    this.info.pattern.classList.toggle('warn', this.calibrateMode && off);
   }
 
   // ============================== tabs & panels ==============================
 
-  /** WARP tab edits the bezier layer, FENCE tab the fence layer. */
-  activeLayer(): 'bezier' | 'fence' | null {
-    return this.currentTab === 'WARP' ? 'bezier' : this.currentTab === 'FENCE' ? 'fence' : null;
+  /** WARP tab edits the bezier layer, FENCE the fence, MODEL the homography corners. */
+  activeLayer(): Layer | null {
+    return this.currentTab === 'WARP'
+      ? 'bezier'
+      : this.currentTab === 'FENCE'
+        ? 'fence'
+        : this.currentTab === 'MODEL'
+          ? 'homo'
+          : null;
   }
 
   private setTab(t: TabId): void {
@@ -629,6 +686,7 @@ export class App implements EditorHost {
   private onKey = (e: KeyboardEvent): void => {
     const target = e.target as HTMLElement;
     if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) return;
+    if (modalOpen()) return; // a dialog owns the keyboard
 
     if (e.key === 'Tab') {
       e.preventDefault();
@@ -644,6 +702,16 @@ export class App implements EditorHost {
       return;
     }
     if (e.ctrlKey || e.metaKey) {
+      // Ctrl+Arrows walk the selection to the neighbouring control point,
+      // so a whole calibration pass can be done without the mouse.
+      if (e.key.startsWith('Arrow')) {
+        e.preventDefault();
+        this.walkSelection(
+          e.key === 'ArrowLeft' ? -1 : e.key === 'ArrowRight' ? 1 : 0,
+          e.key === 'ArrowUp' ? -1 : e.key === 'ArrowDown' ? 1 : 0,
+        );
+        return;
+      }
       const k = e.key.toLowerCase();
       if (k === 'z') {
         e.preventDefault();
@@ -669,7 +737,8 @@ export class App implements EditorHost {
         e.preventDefault();
         const dx = e.key === 'ArrowLeft' ? -1 : e.key === 'ArrowRight' ? 1 : 0;
         const dy = e.key === 'ArrowUp' ? -1 : e.key === 'ArrowDown' ? 1 : 0;
-        this.nudgeSelection(dx, dy, e.shiftKey);
+        if (e.altKey) this.walkSelection(dx, dy);
+        else this.nudgeSelection(dx, dy, e.shiftKey);
         return;
       }
       case 'PageUp':
@@ -734,15 +803,54 @@ export class App implements EditorHost {
     }
   };
 
+  /**
+   * Move the selection to the neighbouring control point (Ctrl/Alt+Arrows).
+   * With nothing selected this seeds a selection rather than doing nothing,
+   * so the keyboard alone can start an editing session.
+   */
+  walkSelection(dx: number, dy: number): void {
+    const r = this.region;
+    const bez = r.bezier;
+    const cur = Array.from(this.selection).find((s) => s.startsWith('b:'));
+    if (!cur) {
+      const post = this.selectedPostIndex();
+      if (post !== null && dx !== 0) {
+        this.selectPost(dx);
+        return;
+      }
+      // seed at the nearest corner in the direction pressed
+      const i = dx > 0 ? bez.cols - 1 : 0;
+      const j = dy > 0 ? bez.rows - 1 : 0;
+      this.selection.clear();
+      this.selection.add(`b:${i}:${j}`);
+      this.selectionChanged();
+      this.setCursorInfo(`selected point ${i},${j}`);
+      return;
+    }
+    const parts = cur.split(':');
+    const i = Math.min(bez.cols - 1, Math.max(0, +parts[1] + dx));
+    const j = Math.min(bez.rows - 1, Math.max(0, +parts[2] + dy));
+    this.selection.clear();
+    this.selection.add(`b:${i}:${j}`);
+    this.selectionChanged();
+    this.setCursorInfo(`point ${i},${j} of ${bez.cols - 1},${bez.rows - 1}`);
+  }
+
   /** dx/dy in {-1,0,1}; fine = 0.25 px steps, coarse = 4 px (projector px). */
   private nudgeSelection(dx: number, dy: number, fine: boolean): void {
-    if (this.selection.size === 0) return;
+    if (this.selection.size === 0) {
+      // Used to be a silent no-op, which reads as "the arrow keys are
+      // broken" — especially in a mosaic, where switching regions or
+      // missing a handle clears the selection invisibly.
+      this.setCursorInfo('nothing selected — click a point, or Ctrl+Arrows to pick one');
+      return;
+    }
     const px = fine ? 0.25 : 4;
     const r = this.region;
     // region-local normalized units so a "px" is a pixel of THIS projector
     const dxN = (dx * px) / (this.project.outputW * r.rect.w);
     const dyN = (dy * px) / (this.project.outputH * r.rect.h);
-    this.beginGesture();
+    this.beginNudgeGesture();
     for (const id of this.selection) {
       const parts = id.split(':');
       if (parts[0] === 'b') {
@@ -755,6 +863,10 @@ export class App implements EditorHost {
       } else if (parts[0] === 'fb') {
         const post = r.fence.posts[+parts[1]];
         if (post) post.bottom += dyN;
+      } else if (parts[0] === 'h') {
+        const a = regionAspect(this.project, r);
+        const v = readHandleValue(r, a, id);
+        if (v) writeHandleValue(r, a, id, v, dxN, dyN);
       } else if (parts[0] === 'fp') {
         const i = +parts[1];
         if (dxN !== 0) r.fence = setPostX(r.fence, i, r.fence.posts[i].x + dxN);
@@ -907,9 +1019,11 @@ export class App implements EditorHost {
 
   // ============================== warp ops (active region) ==============================
 
-  setDensity(n: number): void {
-    const d = Math.min(17, Math.max(3, Math.round(n)));
-    if (!confirm(`Reset bezier grid to ${d} × ${d}? Current bezier warp will be lost.`)) return;
+  async setDensity(n: number): Promise<void> {
+    const d = Math.min(17, Math.max(2, Math.round(n)));
+    const label = d === 2 ? '2 × 2 (bilinear corner-pin)' : `${d} × ${d}`;
+    if (!(await confirmModal(`Reset bezier grid to ${label}? Current bezier warp will be lost.`, 'GRID DENSITY')))
+      return;
     this.edit(
       () => {
         this.region.bezier = createBezierGrid(d, d);
@@ -920,10 +1034,13 @@ export class App implements EditorHost {
   }
 
   /** Subdivide the band at the selected bezier point (knot insertion). */
-  subdivide(direction: 'col' | 'row'): void {
+  async subdivide(direction: 'col' | 'row'): Promise<void> {
     const sel = Array.from(this.selection).filter((s) => s.startsWith('b:'));
     if (sel.length === 0) {
-      alert('Select a bezier control point first — the band after it gets subdivided.');
+      await alertModal(
+        'Select a bezier control point first — the band after it gets subdivided.',
+        'NO SELECTION',
+      );
       return;
     }
     const parts = sel[0].split(':');
@@ -1000,8 +1117,8 @@ export class App implements EditorHost {
     this.region.fence = setPostX(this.region.fence, i, x);
   }
 
-  resetBezier(): void {
-    if (!confirm('Reset bezier warp to identity (active region)?')) return;
+  async resetBezier(): Promise<void> {
+    if (!(await confirmModal('Reset bezier warp to identity (active region)?', 'RESET BEZIER'))) return;
     this.edit(
       () => {
         this.region.bezier = createBezierGrid(this.region.bezier.cols, this.region.bezier.rows);
@@ -1010,8 +1127,71 @@ export class App implements EditorHost {
     );
   }
 
-  resetFence(): void {
-    if (!confirm('Reset fence (active region)?')) return;
+  // ---- model layers (MODEL tab) ----
+
+  toggleLayer(layer: 'homography' | 'cylinder' | 'residual'): void {
+    this.edit(
+      () => {
+        const r = this.region;
+        if (layer === 'residual') r.residualEnabled = !r.residualEnabled;
+        else r[layer].enabled = !r[layer].enabled;
+        this.selection.clear();
+      },
+      { warp: true, structural: true },
+    );
+  }
+
+  async resetHomography(): Promise<void> {
+    if (!(await confirmModal('Reset homography corners to identity (active region)?', 'RESET HOMOGRAPHY'))) return;
+    this.edit(
+      () => {
+        this.region.homography = { ...defaultHomography(), enabled: this.region.homography.enabled };
+      },
+      { warp: true, structural: true },
+    );
+  }
+
+  async resetCylinder(): Promise<void> {
+    if (!(await confirmModal('Reset cylinder / projector parameters (active region)?', 'RESET CYLINDER'))) return;
+    this.edit(
+      () => {
+        this.region.cylinder = { ...defaultCylinder(), enabled: this.region.cylinder.enabled };
+      },
+      { warp: true, structural: true },
+    );
+  }
+
+  /** Legacy single-lattice warp → homography + residual; picture stays put. Undoable. */
+  upgradeToHomography(): void {
+    this.edit(
+      () => {
+        upgradeToHomography(this.region);
+        this.selection.clear();
+      },
+      { warp: true, structural: true },
+    );
+  }
+
+  smoothBezier(iterations: number): void {
+    this.edit(
+      () => {
+        this.region.bezier = laplacianSmooth(this.region.bezier, iterations);
+      },
+      { warp: true },
+    );
+  }
+
+  refitBezier(): void {
+    this.edit(
+      () => {
+        this.region.bezier = refitPatch(this.region.bezier);
+      },
+      { warp: true },
+    );
+  }
+
+  async resetFence(): Promise<void> {
+    if (!(await confirmModal('Reset fence (active region)?', 'RESET FENCE'))) return;
     this.edit(
       () => {
         this.region.fence = createFence();
@@ -1021,8 +1201,8 @@ export class App implements EditorHost {
     );
   }
 
-  resetAll(): void {
-    if (!confirm('Reset EVERYTHING to defaults?')) return;
+  async resetAll(): Promise<void> {
+    if (!(await confirmModal('Reset EVERYTHING to defaults?', 'RESET ALL'))) return;
     this.edit(
       () => {
         const keep = { w: this.project.outputW, h: this.project.outputH };
@@ -1067,7 +1247,7 @@ export class App implements EditorHost {
         this.applyEdit({ warp: true, pattern: true, structural: true });
         this.layoutViewport();
       },
-      (msg) => alert(`Could not load project: ${msg}`),
+      (msg) => void alertModal(`Could not load project: ${msg}`, 'LOAD FAILED'),
     );
   }
 
@@ -1086,7 +1266,7 @@ export class App implements EditorHost {
       const wPx = Math.max(1, Math.round(r.rect.w * p.outputW));
       const hPx = Math.max(1, Math.round(r.rect.h * p.outputH));
       // High-density sampling mesh, region-local positions for the FBO pass.
-      const mesh = buildRegionMesh(r, 256, false);
+      const mesh = buildRegionMesh(r, regionAspect(p, r), 256, false);
       const uv = this.renderer.renderUVMap(mesh, [r.src.x, r.src.y, r.src.w, r.src.h], wPx, hPx);
       const fn = safeFileName(r.id);
       const warpPath = `warp_${fn}.pfm`;
@@ -1132,7 +1312,7 @@ export class App implements EditorHost {
       if (raw) downloadBytes(archive, `${base}-raw.zip`, 'application/zip');
       else downloadBytes(archive, `${base}.mpcdi`, 'application/zip');
     } catch (e) {
-      alert(`Export failed: ${e instanceof Error ? e.message : e}`);
+      await alertModal(`Export failed: ${e instanceof Error ? e.message : e}`, 'EXPORT FAILED');
     }
   }
 }

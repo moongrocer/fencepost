@@ -14,7 +14,8 @@
  *   fence posts    — orange vertical (warped) lines; selected brighter
  */
 import { ProjectState } from '../state/project';
-import { collectHandles, edgePolyline, Handle, postPolyline } from './handles';
+import { regionAspect } from '../warp/compose';
+import { bezierHandlePos, collectHandles, edgePolyline, Layer, layerOf, postPolyline } from './handles';
 
 export interface OverlayView {
   /** CSS pixel size of the viewport */
@@ -25,18 +26,21 @@ export interface OverlayView {
   hoverId: string | null;
   rubber: { x0: number; y0: number; x1: number; y1: number } | null;
   /** layer the current tab edits: it draws emphasized and on top */
-  activeLayer: 'bezier' | 'fence' | null;
+  activeLayer: Layer | null;
 }
 
 const BEZ_COLOR = '#6f9fd8';
 const BEZ_SEL = '#d8d9a3';
 const FENCE_COLOR = '#e8954a';
 const FENCE_SEL = '#ffd9a3';
+const HOMO_COLOR = '#9fd86f';
+const HOMO_SEL = '#e6ffc2';
 
 export function drawOverlay(ctx: CanvasRenderingContext2D, p: ProjectState, view: OverlayView): void {
   const { cw, ch, dpr } = view;
   const region = p.regions[p.activeRegion];
   const rr = region.rect;
+  const aspect = regionAspect(p, region);
   ctx.save();
   ctx.scale(dpr, dpr);
   ctx.clearRect(0, 0, cw, ch);
@@ -47,8 +51,10 @@ export function drawOverlay(ctx: CanvasRenderingContext2D, p: ProjectState, view
   // isn't clipped by the region/canvas edge.
   const CX = (nx: number) => Math.min((rr.x + rr.w) * cw - 1, Math.max(rr.x * cw + 1, X(nx)));
   const CY = (ny: number) => Math.min((rr.y + rr.h) * ch - 1, Math.max(rr.y * ch + 1, Y(ny)));
-  const fenceAlpha = view.activeLayer === 'bezier' ? 0.4 : 1;
-  const bezierAlpha = view.activeLayer === 'fence' ? 0.35 : 1;
+  const dim = (layer: Layer, a: number) => (view.activeLayer === null || view.activeLayer === layer ? 1 : a);
+  const fenceAlpha = dim('fence', 0.4);
+  const bezierAlpha = dim('bezier', 0.35);
+  const homoAlpha = dim('homo', 0.5);
 
   // region outlines + labels (only interesting with more than one region)
   if (p.regions.length > 1) {
@@ -70,55 +76,52 @@ export function drawOverlay(ctx: CanvasRenderingContext2D, p: ProjectState, view
     ctx.stroke();
   };
 
-  if (p.overlays.fence) {
+  if (p.overlays.fence && region.residualEnabled) {
     ctx.globalAlpha = fenceAlpha;
     ctx.lineWidth = view.activeLayer === 'fence' ? 1.5 : 1;
     ctx.strokeStyle = 'rgba(232,149,74,0.6)';
-    poly(edgePolyline(region, 'top'));
-    poly(edgePolyline(region, 'bottom'));
+    poly(edgePolyline(region, aspect, 'top'));
+    poly(edgePolyline(region, aspect, 'bottom'));
     region.fence.posts.forEach((post, i) => {
       const selected = view.selection.has(`fp:${i}`);
       ctx.strokeStyle = selected ? FENCE_SEL : 'rgba(232,149,74,0.85)';
       ctx.lineWidth = selected ? 2 : view.activeLayer === 'fence' ? 1.5 : 1;
       ctx.setLineDash(post.corner ? [] : [5, 4]);
-      poly(postPolyline(region, i));
+      poly(postPolyline(region, aspect, i));
       ctx.setLineDash([]);
     });
     ctx.globalAlpha = 1;
   }
 
-  if (p.overlays.bezier) {
+  if (p.overlays.bezier && region.residualEnabled) {
     ctx.globalAlpha = bezierAlpha;
-    const { cols, rows, points } = region.bezier;
+    const { cols, rows } = region.bezier;
     ctx.strokeStyle = 'rgba(111,159,216,0.35)';
     ctx.lineWidth = 1;
+    const pt = (i: number, j: number, first: boolean) => {
+      const [x, y] = bezierHandlePos(region, aspect, i, j);
+      first ? ctx.moveTo(X(x), Y(y)) : ctx.lineTo(X(x), Y(y));
+    };
     for (let j = 0; j < rows; j++) {
       ctx.beginPath();
-      for (let i = 0; i < cols; i++) {
-        const k = (j * cols + i) * 2;
-        i === 0 ? ctx.moveTo(X(points[k]), Y(points[k + 1])) : ctx.lineTo(X(points[k]), Y(points[k + 1]));
-      }
+      for (let i = 0; i < cols; i++) pt(i, j, i === 0);
       ctx.stroke();
     }
     for (let i = 0; i < cols; i++) {
       ctx.beginPath();
-      for (let j = 0; j < rows; j++) {
-        const k = (j * cols + i) * 2;
-        j === 0 ? ctx.moveTo(X(points[k]), Y(points[k + 1])) : ctx.lineTo(X(points[k]), Y(points[k + 1]));
-      }
+      for (let j = 0; j < rows; j++) pt(i, j, j === 0);
       ctx.stroke();
     }
     ctx.globalAlpha = 1;
   }
 
   // handles — the active layer's glyphs draw last (on top) at full alpha
-  const handles = collectHandles(region, p.overlays).sort((a, b) => {
-    const act = (h: Handle) =>
-      view.activeLayer === null ? 0 : (h.kind === 'bezier') === (view.activeLayer === 'bezier') ? 1 : 0;
-    return act(a) - act(b);
-  });
+  const alphaOf = (l: Layer) => (l === 'bezier' ? bezierAlpha : l === 'homo' ? homoAlpha : fenceAlpha);
+  const handles = collectHandles(region, p.overlays, aspect).sort(
+    (a, b) => alphaOf(layerOf(a.kind)) - alphaOf(layerOf(b.kind)),
+  );
   for (const h of handles) {
-    ctx.globalAlpha = h.kind === 'bezier' ? bezierAlpha : fenceAlpha;
+    ctx.globalAlpha = alphaOf(layerOf(h.kind));
     const selected = view.selection.has(h.id);
     const hovered = view.hoverId === h.id;
     const r = hovered ? 5 : 4;
@@ -132,6 +135,15 @@ export function drawOverlay(ctx: CanvasRenderingContext2D, p: ProjectState, view
       ctx.lineWidth = 1;
       ctx.fillRect(x - r, y - r, r * 2, r * 2);
       ctx.strokeRect(x - r + 0.5, y - r + 0.5, r * 2 - 1, r * 2 - 1);
+    } else if (h.kind === 'homo') {
+      // homography corners: circles, green — distinct from both residual layers
+      ctx.fillStyle = selected ? HOMO_SEL : HOMO_COLOR;
+      ctx.strokeStyle = '#1e3a10';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(x, y, r + 1.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
     } else {
       ctx.fillStyle = selected ? FENCE_SEL : FENCE_COLOR;
       ctx.strokeStyle = '#402810';

@@ -13,11 +13,26 @@
  */
 import { ProjectState, RegionState } from '../state/project';
 
-/** Falloff for one edge: d = distance from edge in content px, w = zone width. */
+/**
+ * Falloff for one edge: d = distance from edge in content px, w = zone
+ * width.
+ *
+ * NORMALIZED power ramp: f(t) = t^g / (t^g + (1-t)^g).
+ *
+ * Two neighbouring regions see complementary t across the shared band, so
+ * f(t) + f(1-t) = 1 for EVERY gamma — the seam keeps full brightness while
+ * gamma still shapes the curve. A bare t^g (what this used to be) only
+ * sums to 1 at gamma = 1; at the default 2.2 the band centre summed to
+ * 0.435, i.e. a 56% dark stripe down every seam.
+ */
 export function edgeFalloff(d: number, w: number, gamma: number): number {
   if (w <= 0) return 1;
   const t = Math.min(1, Math.max(0, d / w));
-  return Math.pow(t, gamma);
+  if (t <= 0) return 0;
+  if (t >= 1) return 1;
+  const a = Math.pow(t, gamma);
+  const b = Math.pow(1 - t, gamma);
+  return a / (a + b);
 }
 
 /**
