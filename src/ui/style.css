@@ -378,6 +378,91 @@ body {
   white-space: nowrap;
 }
 
+.lw-infobar span.warn {
+  background: #7a3b34;
+  color: #ffe6c8;
+  padding: 0 4px;
+}
+
+/* ---------- active-region badge on WARP / FENCE / BLEND ---------- */
+.lw-region-badge {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  background: var(--lw-active);
+  border: 1px solid;
+  border-color: var(--lw-bevel-light) var(--lw-bevel-dark) var(--lw-bevel-dark) var(--lw-bevel-light);
+  padding: 2px 4px;
+  margin: 1px 1px 5px;
+  font-size: 10px;
+  color: var(--lw-text);
+}
+
+.lw-region-badge-tag {
+  font-weight: bold;
+  border-right: 1px solid var(--lw-bevel-dark);
+  padding-right: 5px;
+}
+
+/* ---------- modal dialogs (replace native confirm/alert, which
+   force the browser out of fullscreen on the projector rig) ---------- */
+.lw-modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(20, 20, 18, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 120;
+}
+
+.lw-modal-panel {
+  background: var(--lw-panel);
+  border: 1px solid;
+  border-color: var(--lw-bevel-light) var(--lw-bevel-darker) var(--lw-bevel-darker) var(--lw-bevel-light);
+  padding: 8px 12px 10px;
+  min-width: 300px;
+  max-width: 440px;
+  box-shadow: 2px 2px 0 rgba(0, 0, 0, 0.35);
+}
+
+.lw-modal-title {
+  font-size: 9px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: var(--lw-text-dim);
+  border-bottom: 1px solid var(--lw-bevel-dark);
+  box-shadow: 0 1px 0 var(--lw-bevel-light);
+  padding-bottom: 3px;
+  margin-bottom: 8px;
+}
+
+.lw-modal-msg {
+  line-height: 15px;
+  margin-bottom: 10px;
+  white-space: pre-line;
+}
+
+.lw-modal-row {
+  display: flex;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+.lw-modal-btn {
+  width: auto;
+  min-width: 78px;
+}
+
+.lw-modal-btn:focus {
+  outline: 1px dotted var(--lw-text);
+  outline-offset: -3px;
+}
+
+.lw-modal-btn.danger {
+  background: linear-gradient(180deg, #c0a49c, #b09088);
+}
+
 /* ---------- output mode: bare projector feed ---------- */
 body.output-mode .lw-top,
 body.output-mode .lw-infobar,

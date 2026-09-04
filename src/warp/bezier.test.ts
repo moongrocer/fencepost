@@ -9,7 +9,7 @@ import {
 
 describe('bezier grid (B-spline surface)', () => {
   it('fresh grid is the identity map (control points at Greville abscissae)', () => {
-    for (const n of [3, 5, 9, 17]) {
+    for (const n of [2, 3, 5, 9, 17]) {
       const g = createBezierGrid(n, n);
       for (let k = 0; k <= 10; k++) {
         const u = k / 10;
@@ -18,6 +18,39 @@ describe('bezier grid (B-spline surface)', () => {
         expect(x).toBeCloseTo(u, 9);
         expect(y).toBeCloseTo(v, 9);
       }
+    }
+  });
+
+  it('2x2 grid is a degree-1 bilinear corner pin (no spline interpolation)', () => {
+    const g = createBezierGrid(2, 2);
+    expect(g.degreeU).toBe(1);
+    expect(g.degreeV).toBe(1);
+    // corners are the control points themselves
+    expect(evalBezier(g, 0, 0)).toEqual([0, 0]);
+    expect(evalBezier(g, 1, 1)[0]).toBeCloseTo(1, 12);
+
+    // drag the top-right corner: result must be EXACTLY bilinear
+    const k = (0 * 2 + 1) * 2; // i=1, j=0
+    g.points[k] = 1.3;
+    g.points[k + 1] = -0.1;
+    const corner = (i: number, j: number): [number, number] => {
+      const m = (j * 2 + i) * 2;
+      return [g.points[m], g.points[m + 1]];
+    };
+    for (const [u, v] of [
+      [0.25, 0.25],
+      [0.5, 0.5],
+      [0.75, 0.2],
+      [0.1, 0.9],
+    ] as const) {
+      const [p00, p10, p01, p11] = [corner(0, 0), corner(1, 0), corner(0, 1), corner(1, 1)];
+      const bx =
+        (1 - u) * (1 - v) * p00[0] + u * (1 - v) * p10[0] + (1 - u) * v * p01[0] + u * v * p11[0];
+      const by =
+        (1 - u) * (1 - v) * p00[1] + u * (1 - v) * p10[1] + (1 - u) * v * p01[1] + u * v * p11[1];
+      const [x, y] = evalBezier(g, u, v);
+      expect(x).toBeCloseTo(bx, 12);
+      expect(y).toBeCloseTo(by, 12);
     }
   });
 

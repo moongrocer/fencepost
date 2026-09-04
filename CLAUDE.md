@@ -20,15 +20,20 @@ builds the full MPCDI export in memory for inspection).
 
 ## Architecture
 
-- `src/warp/` — bspline.ts (clamped B-spline basis + exact Boehm knot
-  insertion), bezier.ts (warp grid layer), fence.ts (vertical-board layer),
-  compose.ts (fence→bezier composition, region mesh sampling)
+- `src/warp/` — model.ts (parametric layers: Heckbert homography +
+  forward cylinder/UST lens model, Newton inverse), bspline.ts (clamped
+  B-spline basis + exact Boehm knot insertion), bezier.ts (warp grid
+  layer), fence.ts (vertical-board layer), compose.ts (layer stack
+  composition, region mesh sampling), refit.ts (Laplacian smooth, single-
+  patch refit, explicit legacy→homography upgrade)
 - `src/render/` — gl.ts (WebGL2: per-region display pass + UV-export pass),
   patterns.ts (procedural test patterns), blend.ts (canonical blend math,
   mirrored by the shader)
 - `src/ui/` — panels.ts (tool column per tab), overlay.ts (2D handle
   overlay), interaction.ts (pointer editing), handles.ts, dom.ts (LW-style
-  widgets), help.ts, style.css
+  widgets), modal.ts (in-app confirm/alert — NEVER use native
+  confirm()/alert(), they force the browser out of fullscreen), help.ts,
+  style.css
 - `src/export/` — pfm.ts, png.ts (minimal gray PNG), mpcdi-xml.ts, zip.ts
 - `src/state/` — project.ts (model v2 + v1 migration), undo.ts (snapshot
   stack), persist.ts (localStorage autosave + file save/load)
@@ -41,16 +46,29 @@ builds the full MPCDI export in memory for inspection).
   CONTENT space; adjacent windows overlap where beams overlap) + own
   bezier/fence/blend/blackLevel. All editing applies to
   `project.activeRegion`.
-- **Warp pipeline**: region-local UV → fence → bezier → region-local warped
-  position → placed into region rect. Mesh uv attribute stays REGION-LOCAL;
-  shaders derive content UV via the region's `src` uniform.
+- **Warp pipeline** (three-layer stack, compose.ts): region-local UV →
+  [1 homography] → [2 cylinder] = model M(uv); the hand-placed
+  fence→bezier residual is a DISPLACEMENT from identity added on top
+  (position = M(uv) + (bezier(fence(uv)) − uv)). So a fresh lattice passes
+  the model through exactly, and with layers 1+2 off the pipeline is the
+  old fence→bezier chain bit-for-bit. Each layer has its own `enabled`
+  flag; toggling never touches parameters. Pre-stack projects load with
+  1+2 off — promotion is the explicit MODEL-tab "Upgrade", never silent.
+  Mesh uv attribute stays REGION-LOCAL; shaders derive content UV via the
+  region's `src` uniform.
 - **Blend is CONTENT-space** (widths in content px from the src-window
   edge, alpha computed from local UV): ramps ride the warp, so keystoned/
   curved seams get matching blends; neighboring ramps sum to 1 across the
-  shared band (unit tested — keep that invariant).
+  shared band AT EVERY GAMMA (unit tested across gammas — keep that
+  invariant). The ramp is the NORMALIZED power blend
+  `f(t) = t^g / (t^g + (1-t)^g)`; a bare `t^g` only sums to 1 at g=1 and
+  put a 56% dark stripe down every seam at the default 2.2. blend.ts and
+  the GLSL in gl.ts must stay mirrored.
 - **Bezier layer is a clamped B-spline surface**: local subdivision must
   remain EXACT knot insertion (surface never moves). Fresh grids are exact
-  identity (Greville abscissae).
+  identity (Greville abscissae). Density goes down to 2×2, which is
+  degree 1 = exact bilinear corner-pin (plain 4-corner keystone, no spline
+  interpolation).
 - **Coordinate conventions**: y=0 is top in app space; clip-space y is
   flipped so glReadPixels row order matches PFM bottom-to-top directly.
   PFM: 3×float32 little-endian (scale -1.0), R=u G=v as ABSOLUTE
@@ -70,12 +88,21 @@ desktop spanning all projectors.
 
 ## Roadmap (owner-confirmed priorities)
 
-1. Field fixes: coalesce arrow-key nudge undo, replace confirm()/alert()
-   with in-app modals (native dialogs kick the browser out of fullscreen),
-   1:1 resolution-mismatch indicator in calibrate mode, WebGL context-loss
-   recovery, worker-based export for 4K.
+1. Field fixes: ~~coalesce arrow-key nudge undo~~, ~~replace
+   confirm()/alert() with in-app modals~~, ~~1:1 resolution-mismatch
+   indicator in calibrate mode~~ — all DONE. Remaining: WebGL
+   context-loss recovery, worker-based export for 4K.
 2. Camera-assisted calibration (webcam + structured-light gray codes)
    feeding the existing region model; manual editor stays as trim pass.
+   Bring-up proven end-to-end on the rig (`src/remote.ts` +
+   `src/warp/calibrate.ts`). The solver is a GLOBAL robust least-squares
+   fit of the control net over all decoded correspondences (trimmed
+   refits with re-inclusion, Greville-space bending prior with
+   coverage-adaptive weight — see solveRegion). Compensates measured wall
+   irregularities up to the spline's expressiveness; validated on
+   synthetic curved-wall + occlusion cases in calibrate.test.ts. Next
+   step: re-run on the rig and compare against the saved 3×3 result in
+   calibrations/.
 - Explicitly NOT wanted yet: dome/polar fence, STMap export, color tools.
 
 ## Repo etiquette
